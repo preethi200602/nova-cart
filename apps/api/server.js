@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const requireAuth = require('./middleware/auth');
 const crypto = require('crypto');
 const requireAdmin = require('./middleware/requireAdmin');
+const requireSeller = require('./middleware/requireSeller');
 
 const app = express();
 app.use(express.json());
@@ -230,6 +231,13 @@ app.post('/api/admin/seller-applications/:id/approve', requireAuth, requireAdmin
       data: { isSeller: true },
     });
 
+    await prisma.store.create({
+      data: {
+        userId: application.userId,
+        storeName: application.businessName,
+      },
+    });
+
     res.json({ message: 'Application approved', application });
   } catch (err) {
     console.error(err);
@@ -247,6 +255,32 @@ app.post('/api/admin/seller-applications/:id/reject', requireAuth, requireAdmin,
     });
 
     res.json({ message: 'Application rejected', application });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const store = await prisma.store.findUnique({ where: { userId: req.userId } });
+    res.json(store);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const { storeName, banner, description, policies } = req.body;
+
+    const store = await prisma.store.update({
+      where: { userId: req.userId },
+      data: { storeName, banner, description, policies },
+    });
+
+    res.json(store);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });

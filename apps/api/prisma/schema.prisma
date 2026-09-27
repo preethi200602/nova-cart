@@ -24,6 +24,7 @@ model User {
   resetTokenExpiry  DateTime?
   createdAt         DateTime  @default(now())
   sellerApplication SellerApplication?
+    store             Store?
 }
 
 model SellerApplication {
@@ -37,4 +38,15 @@ model SellerApplication {
   status          String   @default("pending")
   rejectionReason String?
   createdAt       DateTime @default(now())
+}
+
+model Store {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id])
+  storeName   String
+  banner      String?
+  description String?
+  policies    String?
+  createdAt   DateTime @default(now())
 }
