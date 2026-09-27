@@ -5,6 +5,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const requireAuth = require('./middleware/auth');
 const crypto = require('crypto');
+const requireAdmin = require('./middleware/requireAdmin');
 
 const app = express();
 app.use(express.json());
@@ -203,6 +204,55 @@ app.get('/api/seller/application', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
+
+app.get('/api/admin/seller-applications', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const applications = await prisma.sellerApplication.findMany({
+      where: { status: 'pending' },
+      include: { user: { select: { email: true, name: true } } },
+    });
+    res.json(applications);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/admin/seller-applications/:id/approve', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const application = await prisma.sellerApplication.update({
+      where: { id: req.params.id },
+      data: { status: 'approved' },
+    });
+
+    await prisma.user.update({
+      where: { id: application.userId },
+      data: { isSeller: true },
+    });
+
+    res.json({ message: 'Application approved', application });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/admin/seller-applications/:id/reject', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { rejectionReason } = req.body;
+
+    const application = await prisma.sellerApplication.update({
+      where: { id: req.params.id },
+      data: { status: 'rejected', rejectionReason },
+    });
+
+    res.json({ message: 'Application rejected', application });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
