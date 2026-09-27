@@ -155,6 +155,54 @@ app.post('/api/auth/reset-password', async (req, res) => {
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
+app.post('/api/seller/apply', requireAuth, async (req, res) => {
+  try {
+    const { businessName, description, categoryFocus, contactDetails } = req.body;
+
+    if (!businessName || !description || !categoryFocus || !contactDetails) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    const existing = await prisma.sellerApplication.findUnique({
+      where: { userId: req.userId },
+    });
+
+    if (existing) {
+      return res.status(409).json({ error: 'You have already submitted a seller application' });
+    }
+
+    const application = await prisma.sellerApplication.create({
+      data: {
+        userId: req.userId,
+        businessName,
+        description,
+        categoryFocus,
+        contactDetails,
+      },
+    });
+
+    res.status(201).json(application);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+app.get('/api/seller/application', requireAuth, async (req, res) => {
+  try {
+    const application = await prisma.sellerApplication.findUnique({
+      where: { userId: req.userId },
+    });
+
+    if (!application) {
+      return res.status(404).json({ error: 'No application found' });
+    }
+
+    res.json(application);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));

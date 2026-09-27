@@ -13,12 +13,28 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 model User {
-  id            String   @id @default(uuid())
-  email         String   @unique
-  password      String
-  name          String?
-  emailVerified Boolean  @default(false)
+  id                String    @id @default(uuid())
+  email             String    @unique
+  password          String
+  name              String?
+  emailVerified     Boolean   @default(false)
+  isSeller          Boolean   @default(false)
+  isAdmin           Boolean   @default(false)
   resetToken        String?
   resetTokenExpiry  DateTime?
-  createdAt     DateTime @default(now())
+  createdAt         DateTime  @default(now())
+  sellerApplication SellerApplication?
+}
+
+model SellerApplication {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id])
+  businessName    String
+  description     String
+  categoryFocus   String
+  contactDetails  String
+  status          String   @default("pending")
+  rejectionReason String?
+  createdAt       DateTime @default(now())
 }
