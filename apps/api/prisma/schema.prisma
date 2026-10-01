@@ -25,6 +25,7 @@ model User {
   createdAt         DateTime  @default(now())
   sellerApplication SellerApplication?
     store             Store?
+    products         Product[]
 }
 
 model SellerApplication {
@@ -49,4 +50,31 @@ model Store {
   description String?
   policies    String?
   createdAt   DateTime @default(now())
+}
+
+model Category {
+  id       String     @id @default(uuid())
+  name     String
+  parentId String?
+  parent   Category?  @relation("CategoryToSubcategory", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryToSubcategory")
+  products Product[]
+}
+
+model Product {
+  id          String   @id @default(uuid())
+  sellerId    String
+  seller      User     @relation(fields: [sellerId], references: [id])
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+  name        String
+  description String
+  price       Float
+  salePrice   Float?
+  stock       Int      @default(0)
+  tags        String?
+  images      String[]
+  state       String   @default("draft")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
