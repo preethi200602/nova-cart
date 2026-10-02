@@ -13,6 +13,20 @@ app.use(express.json());
 
 const prisma = new PrismaClient();
 
+async function decrementStock(productId, quantity) {
+  const result = await prisma.product.updateMany({
+    where: {
+      id: productId,
+      stock: { gte: quantity },
+    },
+    data: {
+      stock: { decrement: quantity },
+    },
+  });
+
+  return result.count > 0;
+}
+
 app.use(require('cors')());
 
 app.get('/health', (req, res) => {
@@ -281,6 +295,156 @@ app.put('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
     });
 
     res.json(store);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/products', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const { name, description, price, salePrice, stock, categoryId, tags, images } = req.body;
+
+    if (!name || !description || !price || !categoryId) {
+      return res.status(400).json({ error: 'name, description, price, and categoryId are required' });
+    }
+
+    const category = await prisma.category.findUnique({ where: { id: categoryId } });
+    if (!category) {
+      return res.status(400).json({ error: 'Invalid categoryId' });
+    }
+
+    const product = await prisma.product.create({
+      data: {
+        sellerId: req.userId,
+        categoryId,
+        name,
+        description,
+        price,
+        salePrice: salePrice || null,
+        stock: stock || 0,
+        tags: tags || null,
+        images: images || [],
+      },
+    });
+
+    res.status(201).json(product);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/seller/products', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const products = await prisma.product.findMany({
+      where: { sellerId: req.userId },
+      include: { category: true },
+    });
+    res.json(products);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/products/:id', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    if (product.sellerId !== req.userId) {
+      return res.status(403).json({ error: 'You can only edit your own products' });
+    }
+
+    const { name, description, price, salePrice, stock, categoryId, tags, images, state } = req.body;
+
+    const updated = await prisma.product.update({
+      where: { id: req.params.id },
+      data: { name, description, price, salePrice, stock, categoryId, tags, images, state },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/products/:id/deactivate', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    if (product.sellerId !== req.userId) {
+      return res.status(403).json({ error: 'You can only manage your own products' });
+    }
+
+    const updated = await prisma.product.update({
+      where: { id: req.params.id },
+      data: { state: 'archived' },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/products/:id', async (req, res) => {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id: req.params.id },
+      include: {
+        category: true,
+        seller: {
+          select: {
+            id: true,
+            name: true,
+            store: true,
+          },
+        },
+      },
+    });
+
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.json(product);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/products/:id/test-decrement', async (req, res) => {
+  const { quantity } = req.body;
+  const success = await decrementStock(req.params.id, quantity || 1);
+
+  if (!success) {
+    return res.status(400).json({ error: 'Not enough stock' });
+  }
+
+  const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+  res.json({ message: 'Stock decremented', currentStock: product.stock });
+});
+
+app.get('/api/sellers/:sellerId/products', async (req, res) => {
+  try {
+    const products = await prisma.product.findMany({
+      where: {
+        sellerId: req.params.sellerId,
+        state: 'active',
+      },
+      include: { category: true },
+    });
+    res.json(products);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
