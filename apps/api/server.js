@@ -687,10 +687,9 @@ app.post('/api/checkout', requireAuth, async (req, res) => {
     for (const sellerId of Object.keys(itemsBySeller)) {
       const sellerItems = itemsBySeller[sellerId];
 
-      // Decrement stock atomically for each item; bail out if any fails
+            // Check stock is sufficient (actual decrement happens on payment confirmation, not here)
       for (const item of sellerItems) {
-        const success = await decrementStock(item.productId, item.quantity);
-        if (!success) {
+        if (item.product.stock < item.quantity) {
           return res.status(409).json({ error: `${item.product.name} just went out of stock. Please update your cart.` });
         }
       }
