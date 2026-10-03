@@ -26,6 +26,9 @@ model User {
   sellerApplication SellerApplication?
     store             Store?
     products         Product[]
+      cart            Cart?
+  buyerOrders     Order[] @relation("BuyerOrders")
+  sellerOrders    Order[] @relation("SellerOrders")
 }
 
 model SellerApplication {
@@ -77,4 +80,47 @@ model Product {
   state       String   @default("draft")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+    cartItems  CartItem[]
+  orderItems OrderItem[]
+}
+
+model Cart {
+  id        String     @id @default(uuid())
+  buyerId   String     @unique
+  buyer     User       @relation(fields: [buyerId], references: [id])
+  items     CartItem[]
+  updatedAt DateTime   @updatedAt
+}
+
+model CartItem {
+  id        String  @id @default(uuid())
+  cartId    String
+  cart      Cart    @relation(fields: [cartId], references: [id])
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+}
+
+model Order {
+  id              String      @id @default(uuid())
+  buyerId         String
+  buyer           User        @relation("BuyerOrders", fields: [buyerId], references: [id])
+  sellerId        String
+  seller          User        @relation("SellerOrders", fields: [sellerId], references: [id])
+  items           OrderItem[]
+  status          String      @default("payment_pending")
+  subtotal        Float
+  deliveryAddress String
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+}
+
+model OrderItem {
+  id        String  @id @default(uuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id])
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+  price     Float
 }
