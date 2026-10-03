@@ -7,6 +7,7 @@ const requireAuth = require('./middleware/auth');
 const crypto = require('crypto');
 const requireAdmin = require('./middleware/requireAdmin');
 const requireSeller = require('./middleware/requireSeller');
+const { Prisma } = require('@prisma/client');
 
 const app = express();
 app.use(express.json());
@@ -417,6 +418,90 @@ app.get('/api/products/:id', async (req, res) => {
     }
 
     res.json(product);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/products', async (req, res) => {
+  try {
+    const {
+      q,
+      category,
+      minPrice,
+      maxPrice,
+      seller,
+      sort,
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    const where = { state: 'active' };
+
+    if (category) where.categoryId = category;
+    if (seller) where.sellerId = seller;
+    if (minPrice || maxPrice) {
+      where.price = {};
+      if (minPrice) where.price.gte = parseFloat(minPrice);
+      if (maxPrice) where.price.lte = parseFloat(maxPrice);
+    }
+
+    let orderBy = { createdAt: 'desc' };
+    if (sort === 'price_asc') orderBy = { price: 'asc' };
+    if (sort === 'price_desc') orderBy = { price: 'desc' };
+    if (sort === 'newest') orderBy = { createdAt: 'desc' };
+
+    let products;
+    let total;
+
+    if (q) {
+      const searchCondition = Prisma.sql`
+        AND (
+          similarity(name, ${q}) > 0.15
+          OR similarity(description, ${q}) > 0.1
+          OR name ILIKE ${'%' + q + '%'}
+        )
+      `;
+
+      products = await prisma.$queryRaw`
+        SELECT *, similarity(name, ${q}) as relevance
+        FROM "Product"
+        WHERE state = 'active'
+        ${category ? Prisma.sql`AND "categoryId" = ${category}` : Prisma.empty}
+        ${seller ? Prisma.sql`AND "sellerId" = ${seller}` : Prisma.empty}
+        ${minPrice ? Prisma.sql`AND price >= ${parseFloat(minPrice)}` : Prisma.empty}
+        ${maxPrice ? Prisma.sql`AND price <= ${parseFloat(maxPrice)}` : Prisma.empty}
+        ${searchCondition}
+        ORDER BY relevance DESC
+        LIMIT ${limitNum} OFFSET ${skip}
+      `;
+      total = products.length;
+    } else {
+      [products, total] = await Promise.all([
+        prisma.product.findMany({
+          where,
+          orderBy,
+          skip,
+          take: limitNum,
+          include: { category: true },
+        }),
+        prisma.product.count({ where }),
+      ]);
+    }
+
+    res.json({
+      products,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+      },
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
