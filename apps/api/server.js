@@ -647,6 +647,103 @@ app.delete('/api/cart/items/:id', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/checkout', requireAuth, async (req, res) => {
+  try {
+    const { deliveryAddress } = req.body;
+
+    if (!deliveryAddress) {
+      return res.status(400).json({ error: 'deliveryAddress is required' });
+    }
+
+    const cart = await prisma.cart.findUnique({
+      where: { buyerId: req.userId },
+      include: { items: { include: { product: true } } },
+    });
+
+    if (!cart || cart.items.length === 0) {
+      return res.status(400).json({ error: 'Cart is empty' });
+    }
+
+    // Re-check every item is still valid before touching anything
+    for (const item of cart.items) {
+      if (item.product.state !== 'active') {
+        return res.status(400).json({ error: `${item.product.name} is no longer available` });
+      }
+      if (item.product.stock < item.quantity) {
+        return res.status(400).json({ error: `Not enough stock for ${item.product.name}` });
+      }
+    }
+
+    // Group cart items by seller
+    const itemsBySeller = {};
+    for (const item of cart.items) {
+      const sellerId = item.product.sellerId;
+      if (!itemsBySeller[sellerId]) itemsBySeller[sellerId] = [];
+      itemsBySeller[sellerId].push(item);
+    }
+
+    const createdOrders = [];
+
+    for (const sellerId of Object.keys(itemsBySeller)) {
+      const sellerItems = itemsBySeller[sellerId];
+
+      // Decrement stock atomically for each item; bail out if any fails
+      for (const item of sellerItems) {
+        const success = await decrementStock(item.productId, item.quantity);
+        if (!success) {
+          return res.status(409).json({ error: `${item.product.name} just went out of stock. Please update your cart.` });
+        }
+      }
+
+      const subtotal = sellerItems.reduce((sum, item) => {
+        const price = item.product.salePrice || item.product.price;
+        return sum + price * item.quantity;
+      }, 0);
+
+      const order = await prisma.order.create({
+        data: {
+          buyerId: req.userId,
+          sellerId,
+          deliveryAddress,
+          subtotal,
+          status: 'payment_pending',
+          items: {
+            create: sellerItems.map((item) => ({
+              productId: item.productId,
+              quantity: item.quantity,
+              price: item.product.salePrice || item.product.price,
+            })),
+          },
+        },
+        include: { items: true },
+      });
+
+      createdOrders.push(order);
+    }
+
+    // Clear the cart now that orders are created
+    await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+
+    res.status(201).json({ message: 'Orders created', orders: createdOrders });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/orders', requireAuth, async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      where: { buyerId: req.userId },
+      include: { items: { include: { product: { select: { name: true, images: true } } } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(orders);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
