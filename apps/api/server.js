@@ -8,6 +8,12 @@ const crypto = require('crypto');
 const requireAdmin = require('./middleware/requireAdmin');
 const requireSeller = require('./middleware/requireSeller');
 const { Prisma } = require('@prisma/client');
+const Razorpay = require('razorpay');
+
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
 
 const app = express();
 app.use(express.json());
@@ -738,6 +744,83 @@ app.get('/api/orders', requireAuth, async (req, res) => {
       orderBy: { createdAt: 'desc' },
     });
     res.json(orders);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/orders/:id/create-payment', requireAuth, async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+
+    if (!order || order.buyerId !== req.userId) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    if (order.status !== 'payment_pending') {
+      return res.status(400).json({ error: 'This order is not awaiting payment' });
+    }
+
+    const razorpayOrder = await razorpay.orders.create({
+      amount: Math.round(order.subtotal * 100),
+      currency: 'INR',
+      receipt: order.id,
+    });
+
+    res.json({
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      keyId: process.env.RAZORPAY_KEY_ID,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: { items: true },
+    });
+
+    if (!order || order.buyerId !== req.userId) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    if (order.status !== 'payment_pending') {
+      return res.status(400).json({ error: 'This order is not awaiting payment' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ error: 'Payment verification failed' });
+    }
+
+    for (const item of order.items) {
+      const success = await decrementStock(item.productId, item.quantity);
+      if (!success) {
+        return res.status(409).json({
+          error: `Payment verified, but ${item.productId} is now out of stock. Please contact support for a refund.`,
+        });
+      }
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: order.id },
+      data: { status: 'confirmed' },
+    });
+
+    res.json({ message: 'Payment confirmed', order: updatedOrder });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
