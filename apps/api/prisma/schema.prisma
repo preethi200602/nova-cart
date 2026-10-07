@@ -113,6 +113,12 @@ model Order {
   deliveryAddress String
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
+    platformFee       Float?
+  payoutAmount      Float?
+  refundRequestedAt DateTime?
+  refundReason      String?
+  deliveredAt       DateTime?
+  transactions      Transaction[]
 }
 
 model OrderItem {
@@ -123,4 +129,13 @@ model OrderItem {
   product   Product @relation(fields: [productId], references: [id])
   quantity  Int
   price     Float
+}
+
+model Transaction {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id])
+  type      String
+  amount    Float
+  createdAt DateTime @default(now())
 }

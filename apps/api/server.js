@@ -802,11 +802,14 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
+      console.log('EXPECTED:', expectedSignature);
+      console.log('RECEIVED:', razorpay_signature);
+
     if (expectedSignature !== razorpay_signature) {
       return res.status(400).json({ error: 'Payment verification failed' });
     }
 
-    for (const item of order.items) {
+        for (const item of order.items) {
       const success = await decrementStock(item.productId, item.quantity);
       if (!success) {
         return res.status(409).json({
@@ -815,12 +818,86 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       }
     }
 
+    const feePercent = parseFloat(process.env.PLATFORM_FEE_PERCENT) / 100;
+    const platformFee = Math.round(order.subtotal * feePercent * 100) / 100;
+    const payoutAmount = Math.round((order.subtotal - platformFee) * 100) / 100;
+
     const updatedOrder = await prisma.order.update({
       where: { id: order.id },
-      data: { status: 'confirmed' },
+      data: {
+        status: 'confirmed',
+        platformFee,
+        payoutAmount,
+      },
+    });
+
+    await prisma.transaction.createMany({
+      data: [
+        { orderId: order.id, type: 'payment', amount: order.subtotal },
+        { orderId: order.id, type: 'platform_fee', amount: platformFee },
+        { orderId: order.id, type: 'payout', amount: payoutAmount },
+      ],
     });
 
     res.json({ message: 'Payment confirmed', order: updatedOrder });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/orders/:id/request-refund', requireAuth, async (req, res) => {
+  try {
+    const { reason } = req.body;
+
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+
+    if (!order || order.buyerId !== req.userId) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    if (order.status !== 'delivered') {
+      return res.status(400).json({ error: 'Only delivered orders can be refunded' });
+    }
+
+    const RETURN_WINDOW_DAYS = 7;
+    const deliveredDate = new Date(order.deliveredAt);
+    const daysSinceDelivery = (Date.now() - deliveredDate.getTime()) / (1000 * 60 * 60 * 24);
+
+    if (daysSinceDelivery > RETURN_WINDOW_DAYS) {
+      return res.status(400).json({ error: 'Return window has expired' });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        status: 'refund_requested',
+        refundRequestedAt: new Date(),
+        refundReason: reason || null,
+      },
+    });
+
+    res.json({ message: 'Refund requested', order: updatedOrder });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/orders/:id/transactions', requireAuth, async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+
+    if (!order || (order.buyerId !== req.userId && order.sellerId !== req.userId)) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where: { orderId: req.params.id },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    res.json(transactions);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
