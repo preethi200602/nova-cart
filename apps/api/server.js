@@ -884,6 +884,52 @@ app.post('/api/orders/:id/request-refund', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/orders/:id/approve-refund', requireAuth, async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: { items: true },
+    });
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    const isOwningSeller = order.sellerId === req.userId;
+    const isAdmin = user.isAdmin;
+
+    if (!isOwningSeller && !isAdmin) {
+      return res.status(403).json({ error: 'Not authorized to approve this refund' });
+    }
+
+    if (order.status !== 'refund_requested') {
+      return res.status(400).json({ error: 'This order has no pending refund request' });
+    }
+
+    for (const item of order.items) {
+      await prisma.product.update({
+        where: { id: item.productId },
+        data: { stock: { increment: item.quantity } },
+      });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: order.id },
+      data: { status: 'refunded' },
+    });
+
+    await prisma.transaction.create({
+      data: { orderId: order.id, type: 'refund', amount: -order.subtotal },
+    });
+
+    res.json({ message: 'Refund approved', order: updatedOrder });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 app.get('/api/orders/:id/transactions', requireAuth, async (req, res) => {
   try {
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
