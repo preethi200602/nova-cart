@@ -795,6 +795,37 @@ app.post('/api/orders/:id/create-payment', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/seller/orders', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      where: { sellerId: req.userId },
+      include: { items: { include: { product: { select: { name: true, images: true } } } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(orders);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      include: {
+        buyer: { select: { id: true, name: true, email: true } },
+        seller: { select: { id: true, name: true, email: true } },
+        items: { include: { product: { select: { name: true } } } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(orders);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
