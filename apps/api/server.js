@@ -34,6 +34,21 @@ async function decrementStock(productId, quantity) {
   return result.count > 0;
 }
 
+const ORDER_TRANSITIONS = {
+  payment_pending: ['confirmed', 'cancelled'],
+  confirmed: ['processing', 'cancelled'],
+  processing: ['shipped', 'cancelled'],
+  shipped: ['delivered'],
+  delivered: ['refund_requested'],
+  refund_requested: ['refunded'],
+  cancelled: [],
+  refunded: [],
+};
+
+function canTransition(fromStatus, toStatus) {
+  return ORDER_TRANSITIONS[fromStatus]?.includes(toStatus) || false;
+}
+
 app.use(require('cors')());
 
 app.get('/health', (req, res) => {
@@ -924,6 +939,95 @@ app.post('/api/orders/:id/approve-refund', requireAuth, async (req, res) => {
     });
 
     res.json({ message: 'Refund approved', order: updatedOrder });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/orders/:id/status', requireAuth, async (req, res) => {
+  try {
+    const { status, trackingInfo } = req.body;
+
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    const isOwningSeller = order.sellerId === req.userId;
+    const isAdmin = user.isAdmin;
+
+    if (!isOwningSeller && !isAdmin) {
+      return res.status(403).json({ error: 'Not authorized to update this order' });
+    }
+
+    if (!canTransition(order.status, status)) {
+      return res.status(400).json({
+        error: `Cannot move order from "${order.status}" to "${status}"`,
+      });
+    }
+
+    const data = { status };
+    if (status === 'shipped' && trackingInfo) {
+      data.trackingInfo = trackingInfo;
+    }
+    if (status === 'delivered') {
+      data.deliveredAt = new Date();
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: order.id },
+      data,
+    });
+
+    res.json({ message: 'Order status updated', order: updatedOrder });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: { items: true },
+    });
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const isOwningBuyer = order.buyerId === req.userId;
+    const isOwningSeller = order.sellerId === req.userId;
+
+    if (!isOwningBuyer && !isOwningSeller) {
+      return res.status(403).json({ error: 'Not authorized to cancel this order' });
+    }
+
+    if (!canTransition(order.status, 'cancelled')) {
+      return res.status(400).json({
+        error: `Cannot cancel an order that is already "${order.status}"`,
+      });
+    }
+
+    if (order.status !== 'payment_pending') {
+      for (const item of order.items) {
+        await prisma.product.update({
+          where: { id: item.productId },
+          data: { stock: { increment: item.quantity } },
+        });
+      }
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: order.id },
+      data: { status: 'cancelled' },
+    });
+
+    res.json({ message: 'Order cancelled', order: updatedOrder });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });

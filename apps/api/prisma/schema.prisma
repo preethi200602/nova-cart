@@ -119,6 +119,7 @@ model Order {
   refundReason      String?
   deliveredAt       DateTime?
   transactions      Transaction[]
+  trackingInfo    String?
 }
 
 model OrderItem {
