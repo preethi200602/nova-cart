@@ -420,7 +420,7 @@ app.post('/api/products/:id/deactivate', requireAuth, requireSeller, async (req,
 
 app.get('/api/products/:id', async (req, res) => {
   try {
-    const product = await prisma.product.findUnique({
+        const product = await prisma.product.findUnique({
       where: { id: req.params.id },
       include: {
         category: true,
@@ -430,6 +430,12 @@ app.get('/api/products/:id', async (req, res) => {
             name: true,
             store: true,
           },
+        },
+        reviews: {
+          include: {
+            buyer: { select: { name: true } },
+          },
+          orderBy: { createdAt: 'desc' },
         },
       },
     });
@@ -551,6 +557,77 @@ app.get('/api/sellers/:sellerId/products', async (req, res) => {
       include: { category: true },
     });
     res.json(products);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/sellers/:sellerId/rating', async (req, res) => {
+  try {
+    const reviews = await prisma.review.findMany({
+      where: { product: { sellerId: req.params.sellerId } },
+      select: { rating: true },
+    });
+
+    if (reviews.length === 0) {
+      return res.json({ averageRating: null, totalReviews: 0 });
+    }
+
+    const sum = reviews.reduce((total, r) => total + r.rating, 0);
+    const averageRating = Math.round((sum / reviews.length) * 10) / 10;
+
+    res.json({ averageRating, totalReviews: reviews.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/reviews/:id/response', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const { sellerResponse } = req.body;
+
+    if (!sellerResponse) {
+      return res.status(400).json({ error: 'sellerResponse is required' });
+    }
+
+    const review = await prisma.review.findUnique({
+      where: { id: req.params.id },
+      include: { product: true },
+    });
+
+    if (!review) {
+      return res.status(404).json({ error: 'Review not found' });
+    }
+
+    if (review.product.sellerId !== req.userId) {
+      return res.status(403).json({ error: 'You can only respond to reviews on your own products' });
+    }
+
+    const updatedReview = await prisma.review.update({
+      where: { id: req.params.id },
+      data: { sellerResponse },
+    });
+
+    res.json(updatedReview);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.delete('/api/admin/reviews/:id', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const review = await prisma.review.findUnique({ where: { id: req.params.id } });
+
+    if (!review) {
+      return res.status(404).json({ error: 'Review not found' });
+    }
+
+    await prisma.review.delete({ where: { id: req.params.id } });
+
+    res.json({ message: 'Review removed' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -821,6 +898,53 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
     });
     res.json(orders);
   } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/products/:id/reviews', requireAuth, async (req, res) => {
+  try {
+    const { orderId, rating, comment } = req.body;
+    const productId = req.params.id;
+
+    if (!orderId || !rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'orderId and a rating between 1 and 5 are required' });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
+
+    if (!order || order.buyerId !== req.userId) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    if (order.status !== 'delivered') {
+      return res.status(400).json({ error: 'You can only review products from delivered orders' });
+    }
+
+    const productInOrder = order.items.some((item) => item.productId === productId);
+    if (!productInOrder) {
+      return res.status(400).json({ error: 'This product was not part of that order' });
+    }
+
+    const review = await prisma.review.create({
+      data: {
+        productId,
+        orderId,
+        buyerId: req.userId,
+        rating,
+        comment: comment || null,
+      },
+    });
+
+    res.status(201).json(review);
+  } catch (err) {
+    if (err.code === 'P2002') {
+      return res.status(409).json({ error: 'You have already reviewed this product for this order' });
+    }
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
