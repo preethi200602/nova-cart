@@ -9,6 +9,7 @@ const requireAdmin = require('./middleware/requireAdmin');
 const requireSeller = require('./middleware/requireSeller');
 const { Prisma } = require('@prisma/client');
 const Razorpay = require('razorpay');
+const { notify } = require('./notify');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -70,11 +71,28 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+        const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
     const user = await prisma.user.create({
-      data: { email, password: hashedPassword, name },
+      data: { email, password: hashedPassword, name, verificationToken, verificationTokenExpiry },
     });
 
-    res.status(201).json({ id: user.id, email: user.email, name: user.name });
+    notify(
+      user.id,
+      'security',
+      'Verify your email address',
+      `Welcome to Nova-Cart! Please verify your email to activate your account (link valid for 24 hours): http://localhost:3000/verify-email?token=${verificationToken}`,
+      { emailOnly: true }
+    );
+
+    res.status(201).json({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      message: 'Account created. Please check your email to verify your address.',
+    });
+  
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -97,6 +115,12 @@ app.post('/api/auth/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+      if (!user.emailVerified) {
+      return res.status(403).json({
+        error: 'Please verify your email before logging in. Check your inbox for the verification link.',
+      });
     }
 
     const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
@@ -152,9 +176,84 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       data: { resetToken, resetTokenExpiry },
     });
 
-    console.log(`Password reset link: http://localhost:3000/reset-password?token=${resetToken}`);
+
+        notify(
+      user.id,
+      'security',
+      'Password reset requested',
+      `Use this link to reset your password (valid for 15 minutes): http://localhost:3000/reset-password?token=${resetToken}`,
+      { emailOnly: true }
+    );
 
     res.json({ message: 'If that email exists, a reset link has been sent.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ error: 'token is required' });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: {
+        verificationToken: token,
+        verificationTokenExpiry: { gt: new Date() },
+      },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired verification link' });
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerified: true, verificationToken: null, verificationTokenExpiry: null },
+    });
+
+    await notify(user.id, 'account', 'Email verified', 'Welcome to Nova-Cart! Your account is now active.');
+
+    res.json({ message: 'Email verified successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/auth/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'email is required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+
+    if (user && !user.emailVerified) {
+      const verificationToken = crypto.randomBytes(32).toString('hex');
+      const verificationTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { verificationToken, verificationTokenExpiry },
+      });
+
+      notify(
+        user.id,
+        'security',
+        'Verify your email address',
+        `Here is your new verification link (valid for 24 hours): http://localhost:3000/verify-email?token=${verificationToken}`,
+        { emailOnly: true }
+      );
+    }
+
+    res.json({ message: 'If that account exists and is unverified, a new link has been sent.' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -274,6 +373,13 @@ app.post('/api/admin/seller-applications/:id/approve', requireAuth, requireAdmin
       },
     });
 
+        await notify(
+      application.userId,
+      'seller',
+      'Your seller application was approved',
+      'Congratulations! Your store is set up. You can now list products from your seller dashboard.'
+    );
+
     res.json({ message: 'Application approved', application });
   } catch (err) {
     console.error(err);
@@ -289,6 +395,13 @@ app.post('/api/admin/seller-applications/:id/reject', requireAuth, requireAdmin,
       where: { id: req.params.id },
       data: { status: 'rejected', rejectionReason },
     });
+
+        await notify(
+      application.userId,
+      'seller',
+      'Your seller application was not approved',
+      `Unfortunately your application was rejected.${rejectionReason ? ' Reason: ' + rejectionReason : ''}`
+    );
 
     res.json({ message: 'Application rejected', application });
   } catch (err) {
@@ -940,6 +1053,13 @@ app.post('/api/products/:id/reviews', requireAuth, async (req, res) => {
       },
     });
 
+      await notify(
+      order.sellerId,
+      'reviews',
+      'New review received',
+      `A buyer left a ${rating}-star review on one of your products.`
+    );
+
     res.status(201).json(review);
   } catch (err) {
     if (err.code === 'P2002') {
@@ -1009,6 +1129,19 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       ],
     });
 
+        await notify(
+      order.buyerId,
+      'orders',
+      'Order confirmed',
+      `Your payment of ₹${order.subtotal} was received and your order is confirmed.`
+    );
+    await notify(
+      order.sellerId,
+      'orders',
+      'New order received',
+      `You have a new paid order worth ₹${order.subtotal}. Please start preparing it.`
+    );
+
     res.json({ message: 'Payment confirmed', order: updatedOrder });
   } catch (err) {
     console.error(err);
@@ -1046,6 +1179,13 @@ app.post('/api/orders/:id/request-refund', requireAuth, async (req, res) => {
         refundReason: reason || null,
       },
     });
+
+        await notify(
+      order.sellerId,
+      'refunds',
+      'Refund requested',
+      `A buyer requested a refund on order ${order.id.slice(0, 8)}.${reason ? ' Reason: ' + reason : ''} Please review it.`
+    );
 
     res.json({ message: 'Refund requested', order: updatedOrder });
   } catch (err) {
@@ -1093,7 +1233,60 @@ app.post('/api/orders/:id/approve-refund', requireAuth, async (req, res) => {
       data: { orderId: order.id, type: 'refund', amount: -order.subtotal },
     });
 
+    await notify(order.buyerId, 'refunds', 'Refund approved', `Your refund of ₹${order.subtotal} for order ${order.id.slice(0, 8)} was approved.`);
+    await notify(order.sellerId, 'refunds', 'Refund processed', `A refund on order ${order.id.slice(0, 8)} was approved and the stock has been restored.`);
+
     res.json({ message: 'Refund approved', order: updatedOrder });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/orders/:id/reject-refund', requireAuth, async (req, res) => {
+  try {
+    const { reason } = req.body;
+
+    if (!reason) {
+      return res.status(400).json({ error: 'A rejection reason is required' });
+    }
+
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    const isOwningSeller = order.sellerId === req.userId;
+
+    if (!isOwningSeller && !user.isAdmin) {
+      return res.status(403).json({ error: 'Not authorized to reject this refund' });
+    }
+
+    if (order.status !== 'refund_requested') {
+      return res.status(400).json({ error: 'This order has no pending refund request' });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: order.id },
+      data: { status: 'delivered', refundRejectionReason: reason },
+    });
+
+    await notify(
+      order.buyerId,
+      'refunds',
+      'Refund request rejected',
+      `Your refund request for order ${order.id.slice(0, 8)} was rejected. Reason: ${reason}`
+    );
+    await notify(
+      order.sellerId,
+      'refunds',
+      'Refund rejected',
+      `The refund request on order ${order.id.slice(0, 8)} was rejected.`
+    );
+
+    res.json({ message: 'Refund rejected', order: updatedOrder });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -1118,6 +1311,13 @@ app.put('/api/orders/:id/status', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Not authorized to update this order' });
     }
 
+        const SETTABLE_HERE = ['processing', 'shipped', 'delivered'];
+    if (!SETTABLE_HERE.includes(status)) {
+      return res.status(400).json({
+        error: `"${status}" cannot be set here. Use the dedicated cancel or refund endpoints instead.`,
+      });
+    }
+
     if (!canTransition(order.status, status)) {
       return res.status(400).json({
         error: `Cannot move order from "${order.status}" to "${status}"`,
@@ -1136,6 +1336,24 @@ app.put('/api/orders/:id/status', requireAuth, async (req, res) => {
       where: { id: order.id },
       data,
     });
+
+        if (status === 'shipped') {
+      await notify(
+        order.buyerId,
+        'orders',
+        'Your order has shipped',
+        `Your order is on its way.${trackingInfo ? ' Tracking: ' + trackingInfo : ''}`
+      );
+    }
+
+    if (status === 'delivered') {
+      await notify(
+        order.buyerId,
+        'orders',
+        'Your order was delivered',
+        'Your order has been delivered. We hope you love it! Please consider leaving a review.'
+      );
+    }
 
     res.json({ message: 'Order status updated', order: updatedOrder });
   } catch (err) {
@@ -1182,6 +1400,9 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
       data: { status: 'cancelled' },
     });
 
+    await notify(order.buyerId, 'orders', 'Order cancelled', `Order ${order.id.slice(0, 8)} has been cancelled.`);
+    await notify(order.sellerId, 'orders', 'Order cancelled', `Order ${order.id.slice(0, 8)} for your store has been cancelled.`);
+
     res.json({ message: 'Order cancelled', order: updatedOrder });
   } catch (err) {
     console.error(err);
@@ -1207,6 +1428,120 @@ app.get('/api/orders/:id/transactions', requireAuth, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
+});
+
+const NOTIFICATION_CATEGORIES = ['account', 'orders', 'refunds', 'seller', 'reviews', 'security'];
+
+app.get('/api/notifications', requireAuth, async (req, res) => {
+  try {
+    const notifications = await prisma.notification.findMany({
+      where: { userId: req.userId },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    res.json(notifications);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/notifications/unread-count', requireAuth, async (req, res) => {
+  try {
+    const count = await prisma.notification.count({
+      where: { userId: req.userId, read: false },
+    });
+    res.json({ unread: count });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/notifications/read-all', requireAuth, async (req, res) => {
+  try {
+    await prisma.notification.updateMany({
+      where: { userId: req.userId, read: false },
+      data: { read: true },
+    });
+    res.json({ message: 'All notifications marked as read' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/notifications/:id/read', requireAuth, async (req, res) => {
+  try {
+    const notification = await prisma.notification.findUnique({ where: { id: req.params.id } });
+
+    if (!notification || notification.userId !== req.userId) {
+      return res.status(404).json({ error: 'Notification not found' });
+    }
+
+    const updated = await prisma.notification.update({
+      where: { id: req.params.id },
+      data: { read: true },
+    });
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/notification-preferences', requireAuth, async (req, res) => {
+  try {
+    const saved = await prisma.notificationPreference.findMany({ where: { userId: req.userId } });
+
+    const preferences = NOTIFICATION_CATEGORIES.map((category) => {
+      const pref = saved.find((p) => p.category === category);
+      return {
+        category,
+        email: pref ? pref.email : true,
+        inApp: pref ? pref.inApp : true,
+      };
+    });
+
+    res.json(preferences);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/notification-preferences', requireAuth, async (req, res) => {
+  try {
+    const { category, email, inApp } = req.body;
+
+    if (!NOTIFICATION_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+
+    if (category === 'security' && email === false) {
+      return res.status(400).json({ error: 'Security emails cannot be turned off' });
+    }
+
+    const data = {};
+    if (typeof email === 'boolean') data.email = email;
+    if (typeof inApp === 'boolean') data.inApp = inApp;
+
+    const pref = await prisma.notificationPreference.upsert({
+      where: { userId_category: { userId: req.userId, category } },
+      update: data,
+      create: { userId: req.userId, category, ...data },
+    });
+
+    res.json(pref);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/test-notify', requireAuth, async (req, res) => {
+  await notify(req.userId, 'orders', 'Test notification', 'If you can read this, notifications work!');
+  res.json({ message: 'Notification sent' });
 });
 
 const PORT = process.env.PORT || 5000;

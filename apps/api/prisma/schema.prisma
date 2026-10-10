@@ -30,6 +30,10 @@ model User {
   buyerOrders     Order[] @relation("BuyerOrders")
   sellerOrders    Order[] @relation("SellerOrders")
     reviews   Review[]
+      notifications           Notification[]
+  notificationPreferences NotificationPreference[]
+    verificationToken       String?
+  verificationTokenExpiry DateTime?
 }
 
 model SellerApplication {
@@ -123,6 +127,7 @@ model Order {
   transactions      Transaction[]
   trackingInfo    String?
     reviews   Review[]
+  refundRejectionReason String?
 }
 
 model OrderItem {
@@ -158,4 +163,26 @@ model Review {
   createdAt      DateTime @default(now())
 
   @@unique([productId, orderId])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  category  String
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model NotificationPreference {
+  id       String  @id @default(uuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id])
+  category String
+  email    Boolean @default(true)
+  inApp    Boolean @default(true)
+
+  @@unique([userId, category])
 }
