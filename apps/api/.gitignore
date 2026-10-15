@@ -9,3 +9,11 @@ node_modules
 /generated/prisma
 
 /generated/prisma
+
+# AI tool skill folders (regenerable, not project code)
+.agents/
+.claude/
+.cursor/
+.devin/
+.windsurf/
+skills-lock.json
