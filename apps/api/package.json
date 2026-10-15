@@ -13,7 +13,7 @@
   "license": "ISC",
   "packageManager": "pnpm@10.32.1",
   "dependencies": {
-    "@prisma/client": "^6.19.3",
+    "@prisma/client": "6.19.3",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.3",
@@ -25,6 +25,6 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14",
-    "prisma": "^6.19.3"
+    "prisma": "6.19.3"
   }
 }
