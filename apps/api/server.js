@@ -1547,11 +1547,38 @@ const PAID_KEPT_STATUSES = ['confirmed', 'processing', 'shipped', 'delivered', '
 const FULFILLED_STATUSES = ['shipped', 'delivered', 'refund_requested', 'refunded'];
 const PERIOD_UNITS = { day: 'day', week: 'week', month: 'month' };
 
+const ANALYTICS_CACHE_TTL_MS = 5 * 60 * 1000;
+const ANALYTICS_CACHE_MAX = 500;
+const analyticsCacheStore = new Map();
+
+function analyticsCache(req, res, next) {
+  const key = `${req.userId}:${req.originalUrl}`;
+  const hit = analyticsCacheStore.get(key);
+
+  if (hit && hit.expires > Date.now()) {
+    res.set('X-Cache', 'HIT');
+    return res.status(200).json(hit.body);
+  }
+
+  res.set('X-Cache', 'MISS');
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    if (res.statusCode === 200) {
+      if (analyticsCacheStore.size >= ANALYTICS_CACHE_MAX) {
+        analyticsCacheStore.delete(analyticsCacheStore.keys().next().value);
+      }
+      analyticsCacheStore.set(key, { body, expires: Date.now() + ANALYTICS_CACHE_TTL_MS });
+    }
+    return originalJson(body);
+  };
+  next();
+}
+
 function ratio(part, whole) {
   return whole === 0 ? null : Math.round((part / whole) * 1000) / 10;
 }
 
-app.get('/api/seller/analytics/overview', requireAuth, requireSeller, async (req, res) => {
+app.get('/api/seller/analytics/overview', requireAuth, requireSeller, analyticsCache, async (req, res) => {
   try {
     const [row] = await prisma.$queryRaw`
       SELECT
@@ -1580,7 +1607,7 @@ app.get('/api/seller/analytics/overview', requireAuth, requireSeller, async (req
   }
 });
 
-app.get('/api/seller/analytics/revenue', requireAuth, requireSeller, async (req, res) => {
+app.get('/api/seller/analytics/revenue', requireAuth, requireSeller, analyticsCache, async (req, res) => {
   try {
     const unit = Object.hasOwn(PERIOD_UNITS, req.query.period) ? PERIOD_UNITS[req.query.period] : 'day';
     const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
@@ -1605,7 +1632,7 @@ app.get('/api/seller/analytics/revenue', requireAuth, requireSeller, async (req,
   }
 });
 
-app.get('/api/seller/analytics/top-products', requireAuth, requireSeller, async (req, res) => {
+app.get('/api/seller/analytics/top-products', requireAuth, requireSeller, analyticsCache, async (req, res) => {
   try {
     const sortBy = req.query.sort === 'units' ? 'units' : 'revenue';
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
@@ -1633,7 +1660,7 @@ app.get('/api/seller/analytics/top-products', requireAuth, requireSeller, async 
   }
 });
 
-app.get('/api/admin/analytics/overview', requireAuth, requireAdmin, async (req, res) => {
+app.get('/api/admin/analytics/overview', requireAuth, requireAdmin, analyticsCache, async (req, res) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
 
@@ -1684,7 +1711,7 @@ app.get('/api/admin/analytics/overview', requireAuth, requireAdmin, async (req, 
   }
 });
 
-app.get('/api/admin/analytics/top-sellers', requireAuth, requireAdmin, async (req, res) => {
+app.get('/api/admin/analytics/top-sellers', requireAuth, requireAdmin, analyticsCache, async (req, res) => {
   try {
     const sortBy = req.query.sort === 'orders' ? 'orders' : 'revenue';
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
@@ -1711,7 +1738,7 @@ app.get('/api/admin/analytics/top-sellers', requireAuth, requireAdmin, async (re
   }
 });
 
-app.get('/api/admin/analytics/top-categories', requireAuth, requireAdmin, async (req, res) => {
+app.get('/api/admin/analytics/top-categories', requireAuth, requireAdmin, analyticsCache, async (req, res) => {
   try {
     const sortBy = req.query.sort === 'units' ? 'units' : 'revenue';
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
@@ -1741,7 +1768,7 @@ app.get('/api/admin/analytics/top-categories', requireAuth, requireAdmin, async 
   }
 });
 
-app.get('/api/admin/analytics/active-users', requireAuth, requireAdmin, async (req, res) => {
+app.get('/api/admin/analytics/active-users', requireAuth, requireAdmin, analyticsCache, async (req, res) => {
   try {
     const unit = Object.hasOwn(PERIOD_UNITS, req.query.period) ? PERIOD_UNITS[req.query.period] : 'day';
     const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
