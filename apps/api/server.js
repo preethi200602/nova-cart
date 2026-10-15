@@ -1633,5 +1633,56 @@ app.get('/api/seller/analytics/top-products', requireAuth, requireSeller, async 
   }
 });
 
+app.get('/api/admin/analytics/overview', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
+
+    const [orders] = await prisma.$queryRaw`
+      SELECT
+        COUNT(*) FILTER (WHERE status <> 'payment_pending')::int AS placed,
+        COUNT(*) FILTER (WHERE status IN (${Prisma.join(FULFILLED_STATUSES)}))::int AS shipped,
+        COUNT(*) FILTER (WHERE "deliveredAt" IS NOT NULL)::int AS delivered,
+        COUNT(*) FILTER (WHERE "deliveredAt" IS NOT NULL AND "refundRequestedAt" IS NOT NULL)::int AS returned,
+        COALESCE(ROUND((SUM(subtotal) FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS gmv,
+        COALESCE(ROUND((SUM("platformFee") FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS "platformFees"
+      FROM "Order"
+    `;
+
+    const [pay] = await prisma.$queryRaw`
+      SELECT
+        COUNT(*) FILTER (WHERE type = 'payment')::int AS succeeded,
+        COUNT(*) FILTER (WHERE type = 'payment_failed')::int AS failed
+      FROM "Transaction"
+    `;
+
+    const [active] = await prisma.$queryRaw`
+      SELECT
+        COUNT(DISTINCT "buyerId")::int AS buyers,
+        COUNT(DISTINCT "sellerId")::int AS sellers
+      FROM "Order"
+      WHERE status <> 'payment_pending'
+        AND "createdAt" >= (NOW() AT TIME ZONE 'UTC') - (${days}::int * INTERVAL '1 day')
+    `;
+
+    res.json({
+      gmv: orders.gmv,
+      platformFeeRevenue: orders.platformFees,
+      funnel: {
+        placed: orders.placed,
+        shipped: orders.shipped,
+        delivered: orders.delivered,
+        returned: orders.returned,
+      },
+      failedPaymentRatePercent: ratio(pay.failed, pay.succeeded + pay.failed),
+      paymentsSucceeded: pay.succeeded,
+      paymentsFailed: pay.failed,
+      active: { days, buyers: active.buyers, sellers: active.sellers },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
