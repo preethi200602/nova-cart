@@ -1096,6 +1096,9 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       console.log('RECEIVED:', razorpay_signature);
 
     if (expectedSignature !== razorpay_signature) {
+      await prisma.transaction.create({
+        data: { orderId: order.id, type: 'payment_failed', amount: order.subtotal },
+      });
       return res.status(400).json({ error: 'Payment verification failed' });
     }
 
@@ -1229,8 +1232,12 @@ app.post('/api/orders/:id/approve-refund', requireAuth, async (req, res) => {
       data: { status: 'refunded' },
     });
 
-    await prisma.transaction.create({
-      data: { orderId: order.id, type: 'refund', amount: -order.subtotal },
+      await prisma.transaction.createMany({
+      data: [
+        { orderId: order.id, type: 'refund', amount: -order.subtotal },
+        { orderId: order.id, type: 'platform_fee', amount: 0 - (order.platformFee || 0) },
+        { orderId: order.id, type: 'payout', amount: 0 - (order.payoutAmount || 0) },
+      ],
     });
 
     await notify(order.buyerId, 'refunds', 'Refund approved', `Your refund of ₹${order.subtotal} for order ${order.id.slice(0, 8)} was approved.`);
@@ -1403,6 +1410,15 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
     await notify(order.buyerId, 'orders', 'Order cancelled', `Order ${order.id.slice(0, 8)} has been cancelled.`);
     await notify(order.sellerId, 'orders', 'Order cancelled', `Order ${order.id.slice(0, 8)} for your store has been cancelled.`);
 
+    if (order.status !== 'payment_pending') {
+      await prisma.transaction.createMany({
+        data: [
+          { orderId: order.id, type: 'refund', amount: -order.subtotal },
+          { orderId: order.id, type: 'platform_fee', amount: 0 - (order.platformFee || 0) },
+          { orderId: order.id, type: 'payout', amount: 0 - (order.payoutAmount || 0) },
+        ],
+      });
+    }
     res.json({ message: 'Order cancelled', order: updatedOrder });
   } catch (err) {
     console.error(err);
@@ -1542,6 +1558,96 @@ app.put('/api/notification-preferences', requireAuth, async (req, res) => {
 app.post('/api/test-notify', requireAuth, async (req, res) => {
   await notify(req.userId, 'orders', 'Test notification', 'If you can read this, notifications work!');
   res.json({ message: 'Notification sent' });
+});
+
+const PAID_KEPT_STATUSES = ['confirmed', 'processing', 'shipped', 'delivered', 'refund_requested'];
+const FULFILLED_STATUSES = ['shipped', 'delivered', 'refund_requested', 'refunded'];
+const PERIOD_UNITS = { day: 'day', week: 'week', month: 'month' };
+
+function ratio(part, whole) {
+  return whole === 0 ? null : Math.round((part / whole) * 1000) / 10;
+}
+
+app.get('/api/seller/analytics/overview', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const [row] = await prisma.$queryRaw`
+      SELECT
+        COUNT(*) FILTER (WHERE status <> 'payment_pending')::int AS placed,
+        COUNT(*) FILTER (WHERE status IN (${Prisma.join(FULFILLED_STATUSES)}))::int AS fulfilled,
+        COUNT(*) FILTER (WHERE "deliveredAt" IS NOT NULL)::int AS delivered,
+        COUNT(*) FILTER (WHERE "deliveredAt" IS NOT NULL AND "refundRequestedAt" IS NOT NULL)::int AS returned,
+        COALESCE(ROUND((SUM(subtotal) FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS revenue,
+        COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS payouts
+      FROM "Order"
+      WHERE "sellerId" = ${req.userId}
+    `;
+
+    res.json({
+      revenue: row.revenue,
+      payouts: row.payouts,
+      ordersPlaced: row.placed,
+      fulfilmentRatePercent: ratio(row.fulfilled, row.placed),
+      returnRatePercent: ratio(row.returned, row.delivered),
+      deliveredOrders: row.delivered,
+      returnRequests: row.returned,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/seller/analytics/revenue', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const unit = PERIOD_UNITS[req.query.period] || 'day';
+    const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
+
+    const rows = await prisma.$queryRaw`
+      SELECT
+        date_trunc(${Prisma.raw(`'${unit}'`)}, "createdAt") AS period,
+        COUNT(*)::int AS orders,
+        COALESCE(ROUND(SUM(subtotal)::numeric, 2), 0)::float8 AS revenue
+      FROM "Order"
+      WHERE "sellerId" = ${req.userId}
+        AND status IN (${Prisma.join(PAID_KEPT_STATUSES)})
+        AND "createdAt" >= (NOW() AT TIME ZONE 'UTC') - (${days}::int * INTERVAL '1 day')
+      GROUP BY 1
+      ORDER BY 1
+    `;
+
+    res.json({ period: unit, days, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/seller/analytics/top-products', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const sortBy = req.query.sort === 'units' ? 'units' : 'revenue';
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
+
+    const rows = await prisma.$queryRaw`
+      SELECT
+        p.id AS "productId",
+        p.name,
+        SUM(oi.quantity)::int AS units,
+        COALESCE(ROUND(SUM(oi.price * oi.quantity)::numeric, 2), 0)::float8 AS revenue
+      FROM "OrderItem" oi
+      JOIN "Order" o ON o.id = oi."orderId"
+      JOIN "Product" p ON p.id = oi."productId"
+      WHERE o."sellerId" = ${req.userId}
+        AND o.status IN (${Prisma.join(PAID_KEPT_STATUSES)})
+      GROUP BY p.id, p.name
+      ORDER BY ${Prisma.raw(sortBy)} DESC, p.name ASC
+      LIMIT ${limit}
+    `;
+
+    res.json({ sortedBy: sortBy, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
