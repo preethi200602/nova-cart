@@ -1599,7 +1599,7 @@ app.get('/api/seller/analytics/overview', requireAuth, requireSeller, async (req
 
 app.get('/api/seller/analytics/revenue', requireAuth, requireSeller, async (req, res) => {
   try {
-    const unit = PERIOD_UNITS[req.query.period] || 'day';
+    const unit = Object.hasOwn(PERIOD_UNITS, req.query.period) ? PERIOD_UNITS[req.query.period] : 'day';
     const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
 
     const rows = await prisma.$queryRaw`
