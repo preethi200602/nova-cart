@@ -1741,5 +1741,29 @@ app.get('/api/admin/analytics/top-categories', requireAuth, requireAdmin, async 
   }
 });
 
+app.get('/api/admin/analytics/active-users', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const unit = Object.hasOwn(PERIOD_UNITS, req.query.period) ? PERIOD_UNITS[req.query.period] : 'day';
+    const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
+
+    const rows = await prisma.$queryRaw`
+      SELECT
+        date_trunc(${Prisma.raw(`'${unit}'`)}, "createdAt") AS period,
+        COUNT(DISTINCT "buyerId")::int AS buyers,
+        COUNT(DISTINCT "sellerId")::int AS sellers
+      FROM "Order"
+      WHERE status <> 'payment_pending'
+        AND "createdAt" >= (NOW() AT TIME ZONE 'UTC') - (${days}::int * INTERVAL '1 day')
+      GROUP BY 1
+      ORDER BY 1
+    `;
+
+    res.json({ period: unit, days, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
