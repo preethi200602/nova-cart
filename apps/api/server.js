@@ -648,18 +648,6 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-app.post('/api/products/:id/test-decrement', async (req, res) => {
-  const { quantity } = req.body;
-  const success = await decrementStock(req.params.id, quantity || 1);
-
-  if (!success) {
-    return res.status(400).json({ error: 'Not enough stock' });
-  }
-
-  const product = await prisma.product.findUnique({ where: { id: req.params.id } });
-  res.json({ message: 'Stock decremented', currentStock: product.stock });
-});
-
 app.get('/api/sellers/:sellerId/products', async (req, res) => {
   try {
     const products = await prisma.product.findMany({
@@ -1553,11 +1541,6 @@ app.put('/api/notification-preferences', requireAuth, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
-});
-
-app.post('/api/test-notify', requireAuth, async (req, res) => {
-  await notify(req.userId, 'orders', 'Test notification', 'If you can read this, notifications work!');
-  res.json({ message: 'Notification sent' });
 });
 
 const PAID_KEPT_STATUSES = ['confirmed', 'processing', 'shipped', 'delivered', 'refund_requested'];
