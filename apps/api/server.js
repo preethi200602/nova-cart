@@ -1684,5 +1684,32 @@ app.get('/api/admin/analytics/overview', requireAuth, requireAdmin, async (req, 
   }
 });
 
+app.get('/api/admin/analytics/top-sellers', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const sortBy = req.query.sort === 'orders' ? 'orders' : 'revenue';
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
+
+    const rows = await prisma.$queryRaw`
+      SELECT
+        u.id AS "sellerId",
+        u.name,
+        COUNT(*)::int AS orders,
+        COALESCE(ROUND(SUM(o.subtotal)::numeric, 2), 0)::float8 AS revenue,
+        COALESCE(ROUND(SUM(o."platformFee")::numeric, 2), 0)::float8 AS "platformFees"
+      FROM "Order" o
+      JOIN "User" u ON u.id = o."sellerId"
+      WHERE o.status IN (${Prisma.join(PAID_KEPT_STATUSES)})
+      GROUP BY u.id, u.name
+      ORDER BY ${Prisma.raw(sortBy)} DESC, u.name ASC
+      LIMIT ${limit}
+    `;
+
+    res.json({ sortedBy: sortBy, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
