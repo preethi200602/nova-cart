@@ -1711,5 +1711,35 @@ app.get('/api/admin/analytics/top-sellers', requireAuth, requireAdmin, async (re
   }
 });
 
+app.get('/api/admin/analytics/top-categories', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const sortBy = req.query.sort === 'units' ? 'units' : 'revenue';
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
+
+    const rows = await prisma.$queryRaw`
+      SELECT
+        c.id AS "categoryId",
+        c.name,
+        pc.name AS "parentName",
+        SUM(oi.quantity)::int AS units,
+        COALESCE(ROUND(SUM(oi.price * oi.quantity)::numeric, 2), 0)::float8 AS revenue
+      FROM "OrderItem" oi
+      JOIN "Order" o ON o.id = oi."orderId"
+      JOIN "Product" p ON p.id = oi."productId"
+      JOIN "Category" c ON c.id = p."categoryId"
+      LEFT JOIN "Category" pc ON pc.id = c."parentId"
+      WHERE o.status IN (${Prisma.join(PAID_KEPT_STATUSES)})
+      GROUP BY c.id, c.name, pc.name
+      ORDER BY ${Prisma.raw(sortBy)} DESC, c.name ASC
+      LIMIT ${limit}
+    `;
+
+    res.json({ sortedBy: sortBy, data: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
