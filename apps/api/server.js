@@ -1361,6 +1361,7 @@ app.post('/api/orders/:id/approve-refund', requireAuth, async (req, res) => {
         where: { id: item.productId },
         data: { stock: { increment: item.quantity } },
       });
+      await syncStockState(item.productId, { notifySeller: false });
     }
 
     const updatedOrder = await prisma.order.update({
@@ -1535,6 +1536,7 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
           where: { id: item.productId },
           data: { stock: { increment: item.quantity } },
         });
+        await syncStockState(item.productId, { notifySeller: false });
       }
     }
 
