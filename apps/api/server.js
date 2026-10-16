@@ -160,28 +160,69 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
+
+function cleanPhone(value) {
+  const phone = typeof value === 'string' ? value.replace(/[\s-]/g, '') : '';
+  return /^\+?[0-9]{7,15}$/.test(phone) ? phone : null;
+}
+
+function profileView(user) {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    phone: user.phone,
+    emailVerified: user.emailVerified,
+    isSeller: user.isSeller,
+    isAdmin: user.isAdmin,
+  };
+}
+
 app.get('/api/auth/me', requireAuth, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.userId } });
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    res.json({ id: user.id, email: user.email, name: user.name });
+    res.json(profileView(user));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
+
 app.put('/api/auth/me', requireAuth, async (req, res) => {
   try {
-    const { name } = req.body;
+    const body = req.body || {};
+    const data = {};
 
-    const updatedUser = await prisma.user.update({
-      where: { id: req.userId },
-      data: { name },
-    });
+    if (body.name !== undefined) {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (name.length < 1 || name.length > 80) {
+        return res.status(400).json({ error: 'Name must be 1 to 80 characters' });
+      }
+      data.name = name;
+    }
 
-    res.json({ id: updatedUser.id, email: updatedUser.email, name: updatedUser.name });
+    if (body.phone !== undefined) {
+      if (body.phone === null || body.phone === '') {
+        data.phone = null;
+      } else {
+        const phone = cleanPhone(body.phone);
+        if (!phone) {
+          return res.status(400).json({ error: 'Phone must be 7 to 15 digits, with an optional leading +' });
+        }
+        data.phone = phone;
+      }
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+
+    const updatedUser = await prisma.user.update({ where: { id: req.userId }, data });
+
+    res.json(profileView(updatedUser));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -2376,6 +2417,157 @@ app.get('/api/orders/:id', requireAuth, async (req, res) => {
       ...(sellerSide ? { buyer, platformFee: order.platformFee, payoutAmount: order.payoutAmount } : {}),
       viewerRole,
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+const MAX_ADDRESSES = 10;
+
+const ADDRESS_FIELDS = {
+  label: [0, 30],
+  fullName: [1, 80],
+  line1: [1, 120],
+  line2: [0, 120],
+  city: [1, 60],
+  state: [1, 60],
+  postalCode: [3, 12],
+  country: [2, 60],
+};
+
+function cleanAddressInput(body, partial) {
+  const data = {};
+
+  for (const [key, [min, max]] of Object.entries(ADDRESS_FIELDS)) {
+    if (body[key] === undefined) {
+      if (!partial && min > 0 && key !== 'country') return { error: `${key} is required` };
+      continue;
+    }
+    if (body[key] === null && min === 0) {
+      data[key] = null;
+      continue;
+    }
+    const value = typeof body[key] === 'string' ? body[key].trim() : '';
+    if (value.length < min || value.length > max) {
+      return { error: `${key} must be ${min} to ${max} characters` };
+    }
+    data[key] = value.length > 0 ? value : null;
+  }
+
+  if (body.phone !== undefined) {
+    const phone = cleanPhone(body.phone);
+    if (!phone) return { error: 'phone must be 7 to 15 digits, with an optional leading +' };
+    data.phone = phone;
+  } else if (!partial) {
+    return { error: 'phone is required' };
+  }
+
+  return { data };
+}
+
+app.get('/api/addresses', requireAuth, async (req, res) => {
+  try {
+    const addresses = await prisma.address.findMany({
+      where: { userId: req.userId },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
+    });
+    res.json(addresses);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/addresses', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const cleaned = cleanAddressInput(body, false);
+    if (cleaned.error) return res.status(400).json({ error: cleaned.error });
+
+    const created = await prisma.$transaction(async (tx) => {
+      const count = await tx.address.count({ where: { userId: req.userId } });
+      if (count >= MAX_ADDRESSES) return null;
+
+      const makeDefault = count === 0 || body.isDefault === true;
+      if (makeDefault) {
+        await tx.address.updateMany({
+          where: { userId: req.userId, isDefault: true },
+          data: { isDefault: false },
+        });
+      }
+      return tx.address.create({
+        data: { ...cleaned.data, userId: req.userId, isDefault: makeDefault },
+      });
+    });
+
+    if (!created) {
+      return res.status(400).json({ error: `You can save up to ${MAX_ADDRESSES} addresses` });
+    }
+
+    res.status(201).json(created);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.put('/api/addresses/:id', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const address = await prisma.address.findFirst({ where: { id: req.params.id, userId: req.userId } });
+    if (!address) return res.status(404).json({ error: 'Address not found' });
+
+    if (body.isDefault === false) {
+      return res.status(400).json({ error: 'Choose another address as the default instead' });
+    }
+
+    const cleaned = cleanAddressInput(body, true);
+    if (cleaned.error) return res.status(400).json({ error: cleaned.error });
+
+    const makeDefault = body.isDefault === true && !address.isDefault;
+    if (Object.keys(cleaned.data).length === 0 && !makeDefault) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (makeDefault) {
+        await tx.address.updateMany({
+          where: { userId: req.userId, isDefault: true },
+          data: { isDefault: false },
+        });
+      }
+      return tx.address.update({
+        where: { id: address.id },
+        data: { ...cleaned.data, ...(makeDefault ? { isDefault: true } : {}) },
+      });
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.delete('/api/addresses/:id', requireAuth, async (req, res) => {
+  try {
+    const address = await prisma.address.findFirst({ where: { id: req.params.id, userId: req.userId } });
+    if (!address) return res.status(404).json({ error: 'Address not found' });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.address.delete({ where: { id: address.id } });
+
+      if (address.isDefault) {
+        const next = await tx.address.findFirst({
+          where: { userId: req.userId },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (next) await tx.address.update({ where: { id: next.id }, data: { isDefault: true } });
+      }
+    });
+
+    res.json({ message: 'Address deleted' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
