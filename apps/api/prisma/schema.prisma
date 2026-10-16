@@ -85,6 +85,8 @@ model Product {
   state       String   @default("draft")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  moderationReason String?
+  moderatedAt      DateTime?
     cartItems  CartItem[]
   orderItems OrderItem[]
     reviews  Review[]

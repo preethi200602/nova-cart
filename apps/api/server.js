@@ -436,31 +436,95 @@ app.put('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
   }
 });
 
+function cleanProductInput(body, existing) {
+  const data = {};
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+  if (body.name !== undefined) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (name.length < 1 || name.length > 120) return { error: 'Name must be 1 to 120 characters' };
+    data.name = name;
+  }
+  if (body.description !== undefined) {
+    const description = typeof body.description === 'string' ? body.description.trim() : '';
+    if (description.length < 1 || description.length > 5000) {
+      return { error: 'Description must be 1 to 5000 characters' };
+    }
+    data.description = description;
+  }
+  if (body.price !== undefined) {
+    if (!isNum(body.price) || body.price <= 0 || body.price > 10000000) {
+      return { error: 'Price must be a positive number' };
+    }
+    data.price = body.price;
+  }
+  if (body.salePrice !== undefined) {
+    if (body.salePrice === null) {
+      data.salePrice = null;
+    } else if (!isNum(body.salePrice) || body.salePrice <= 0) {
+      return { error: 'Sale price must be a positive number or null' };
+    } else {
+      data.salePrice = body.salePrice;
+    }
+  }
+  if (body.stock !== undefined) {
+    if (!Number.isInteger(body.stock) || body.stock < 0 || body.stock > 1000000) {
+      return { error: 'Stock must be a whole number, 0 or more' };
+    }
+    data.stock = body.stock;
+  }
+  if (body.categoryId !== undefined) {
+    if (typeof body.categoryId !== 'string' || !body.categoryId) return { error: 'Invalid categoryId' };
+    data.categoryId = body.categoryId;
+  }
+  if (body.tags !== undefined) {
+    if (body.tags !== null && (typeof body.tags !== 'string' || body.tags.length > 200)) {
+      return { error: 'Tags must be text up to 200 characters' };
+    }
+    data.tags = body.tags || null;
+  }
+  if (body.images !== undefined) {
+    if (
+      !Array.isArray(body.images) ||
+      body.images.length > 10 ||
+      body.images.some((i) => typeof i !== 'string' || i.length > 500)
+    ) {
+      return { error: 'Images must be a list of up to 10 URLs' };
+    }
+    data.images = body.images;
+  }
+  if (body.state !== undefined) {
+    if (!['draft', 'active'].includes(body.state)) return { error: 'State must be draft or active' };
+    data.state = body.state;
+  }
+
+  const finalPrice = data.price !== undefined ? data.price : existing ? existing.price : null;
+  const finalSale = data.salePrice !== undefined ? data.salePrice : existing ? existing.salePrice : null;
+  if (finalSale !== null && finalPrice !== null && finalSale >= finalPrice) {
+    return { error: 'Sale price must be lower than the price' };
+  }
+
+  return { data };
+}
+
 app.post('/api/products', requireAuth, requireSeller, async (req, res) => {
   try {
-    const { name, description, price, salePrice, stock, categoryId, tags, images } = req.body;
+    const body = req.body || {};
 
-    if (!name || !description || !price || !categoryId) {
+    if (!body.name || !body.description || !body.price || !body.categoryId) {
       return res.status(400).json({ error: 'name, description, price, and categoryId are required' });
     }
 
-    const category = await prisma.category.findUnique({ where: { id: categoryId } });
+    const cleaned = cleanProductInput(body, null);
+    if (cleaned.error) return res.status(400).json({ error: cleaned.error });
+
+    const category = await prisma.category.findUnique({ where: { id: cleaned.data.categoryId } });
     if (!category) {
       return res.status(400).json({ error: 'Invalid categoryId' });
     }
 
     const product = await prisma.product.create({
-      data: {
-        sellerId: req.userId,
-        categoryId,
-        name,
-        description,
-        price,
-        salePrice: salePrice || null,
-        stock: stock || 0,
-        tags: tags || null,
-        images: images || [],
-      },
+      data: { ...cleaned.data, sellerId: req.userId },
     });
 
     res.status(201).json(product);
@@ -493,12 +557,25 @@ app.put('/api/products/:id', requireAuth, requireSeller, async (req, res) => {
     if (product.sellerId !== req.userId) {
       return res.status(403).json({ error: 'You can only edit your own products' });
     }
+    if (product.state === 'removed') {
+      return res.status(403).json({ error: 'This product was removed by an admin and cannot be edited' });
+    }
 
-    const { name, description, price, salePrice, stock, categoryId, tags, images, state } = req.body;
+    const cleaned = cleanProductInput(req.body || {}, product);
+    if (cleaned.error) return res.status(400).json({ error: cleaned.error });
+
+    if (cleaned.data.categoryId) {
+      const category = await prisma.category.findUnique({ where: { id: cleaned.data.categoryId } });
+      if (!category) return res.status(400).json({ error: 'Invalid categoryId' });
+    }
+
+    if (Object.keys(cleaned.data).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
 
     const updated = await prisma.product.update({
       where: { id: req.params.id },
-      data: { name, description, price, salePrice, stock, categoryId, tags, images, state },
+      data: cleaned.data,
     });
 
     res.json(updated);
@@ -517,6 +594,9 @@ app.post('/api/products/:id/deactivate', requireAuth, requireSeller, async (req,
     }
     if (product.sellerId !== req.userId) {
       return res.status(403).json({ error: 'You can only manage your own products' });
+    }
+    if (product.state === 'removed') {
+      return res.status(409).json({ error: 'This product was already removed by an admin' });
     }
 
     const updated = await prisma.product.update({
@@ -1967,6 +2047,100 @@ app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, r
 
     await prisma.category.delete({ where: { id: category.id } });
     res.json({ message: 'Category deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+const PRODUCT_STATES = ['draft', 'active', 'archived', 'removed'];
+
+app.get('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { state, seller, q } = req.query;
+    const pageNum = Math.max(parseInt(req.query.page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+
+    const where = {};
+    if (typeof state === 'string' && PRODUCT_STATES.includes(state)) where.state = state;
+    if (typeof seller === 'string' && seller) where.sellerId = seller;
+    if (typeof q === 'string' && q.trim()) where.name = { contains: q.trim(), mode: 'insensitive' };
+
+    const [products, total] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (pageNum - 1) * limitNum,
+        take: limitNum,
+        include: {
+          category: true,
+          seller: { select: { id: true, name: true, email: true } },
+        },
+      }),
+      prisma.product.count({ where }),
+    ]);
+
+    res.json({ products, pagination: { page: pageNum, limit: limitNum, total } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/admin/products/:id/remove', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 5 || reason.length > 500) {
+      return res.status(400).json({ error: 'A reason of 5 to 500 characters is required' });
+    }
+
+    const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    if (product.state === 'removed') {
+      return res.status(409).json({ error: 'Product is already removed' });
+    }
+
+    const updated = await prisma.product.update({
+      where: { id: product.id },
+      data: { state: 'removed', moderationReason: reason, moderatedAt: new Date() },
+    });
+
+    await notify(
+      product.sellerId,
+      'seller',
+      'Product removed',
+      `Your product "${product.name}" was removed by an admin. Reason: ${reason}`
+    );
+
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/admin/products/:id/restore', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const product = await prisma.product.findUnique({ where: { id: req.params.id } });
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    if (product.state !== 'removed') {
+      return res.status(409).json({ error: 'Product is not removed' });
+    }
+
+    const updated = await prisma.product.update({
+      where: { id: product.id },
+      data: { state: 'draft', moderationReason: null, moderatedAt: null },
+    });
+
+    await notify(
+      product.sellerId,
+      'seller',
+      'Product restored',
+      `Your product "${product.name}" was restored as a draft. You can review it and publish it again.`
+    );
+
+    res.json(updated);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
