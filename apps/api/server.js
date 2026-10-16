@@ -589,93 +589,100 @@ app.get('/api/products', async (req, res) => {
     const min = Number.isFinite(parsedMin) ? parsedMin : null;
     const max = Number.isFinite(parsedMax) ? parsedMax : null;
 
+    const parsedRating = parseFloat(req.query.minRating);
+    const minRating = Number.isFinite(parsedRating) ? Math.min(Math.max(parsedRating, 0), 5) : null;
+    const inStock = req.query.inStock === 'true';
+
     const categoryIds = category ? await categoryWithDescendants(String(category)) : null;
     const sellerId = seller ? String(seller) : null;
     const search = typeof q === 'string' ? q.trim() : '';
+    const likePattern = search ? '%' + search.replace(/[\\%_]/g, '\\$&') + '%' : null;
 
-    let products;
-    let total;
+    const categoryFilter = categoryIds
+      ? categoryIds.length > 0
+        ? Prisma.sql`AND p."categoryId" IN (${Prisma.join(categoryIds)})`
+        : Prisma.sql`AND FALSE`
+      : Prisma.empty;
 
-    if (search) {
-      const likePattern = '%' + search.replace(/[\\%_]/g, '\\$&') + '%';
+    const searchFilter = search
+      ? Prisma.sql`AND (
+          similarity(p.name, ${search}) > 0.15
+          OR similarity(p.description, ${search}) > 0.1
+          OR p.name ILIKE ${likePattern}
+          OR p.tags ILIKE ${likePattern}
+        )`
+      : Prisma.empty;
 
-      const categoryFilter = categoryIds
-        ? categoryIds.length > 0
-          ? Prisma.sql`AND "categoryId" IN (${Prisma.join(categoryIds)})`
-          : Prisma.sql`AND FALSE`
-        : Prisma.empty;
+    const fromSql = Prisma.sql`
+      FROM "Product" p
+      JOIN "Category" c ON c.id = p."categoryId"
+      LEFT JOIN (
+        SELECT "productId",
+               COUNT(*)::int AS "reviewCount",
+               ROUND(AVG(rating)::numeric, 1)::float8 AS "avgRating"
+        FROM "Review"
+        GROUP BY "productId"
+      ) r ON r."productId" = p.id
+    `;
 
-      const filters = Prisma.sql`
-        state = 'active'
-        ${categoryFilter}
-        ${sellerId ? Prisma.sql`AND "sellerId" = ${sellerId}` : Prisma.empty}
-        ${min !== null ? Prisma.sql`AND price >= ${min}` : Prisma.empty}
-        ${max !== null ? Prisma.sql`AND price <= ${max}` : Prisma.empty}
-        AND (
-          similarity(name, ${search}) > 0.15
-          OR similarity(description, ${search}) > 0.1
-          OR name ILIKE ${likePattern}
-        )
-      `;
+    const whereSql = Prisma.sql`
+      WHERE p.state = 'active'
+      ${categoryFilter}
+      ${sellerId ? Prisma.sql`AND p."sellerId" = ${sellerId}` : Prisma.empty}
+      ${min !== null ? Prisma.sql`AND p.price >= ${min}` : Prisma.empty}
+      ${max !== null ? Prisma.sql`AND p.price <= ${max}` : Prisma.empty}
+      ${inStock ? Prisma.sql`AND p.stock > 0` : Prisma.empty}
+      ${minRating !== null ? Prisma.sql`AND r."avgRating" >= ${minRating}` : Prisma.empty}
+      ${searchFilter}
+    `;
 
-      let orderSql = Prisma.sql`relevance DESC, "createdAt" DESC`;
-      if (sort === 'price_asc') orderSql = Prisma.sql`price ASC, relevance DESC`;
-      if (sort === 'price_desc') orderSql = Prisma.sql`price DESC, relevance DESC`;
-      if (sort === 'newest') orderSql = Prisma.sql`"createdAt" DESC, relevance DESC`;
-
-      products = await prisma.$queryRaw`
-        SELECT *, similarity(name, ${search}) AS relevance
-        FROM "Product"
-        WHERE ${filters}
-        ORDER BY ${orderSql}
-        LIMIT ${limitNum} OFFSET ${skip}
-      `;
-
-      const [countRow] = await prisma.$queryRaw`
-        SELECT COUNT(*)::int AS count FROM "Product" WHERE ${filters}
-      `;
-      total = countRow.count;
-    } else {
-      const where = { state: 'active' };
-
-      if (categoryIds) where.categoryId = { in: categoryIds };
-      if (sellerId) where.sellerId = sellerId;
-      if (min !== null || max !== null) {
-        where.price = {};
-        if (min !== null) where.price.gte = min;
-        if (max !== null) where.price.lte = max;
-      }
-
-      let orderBy = { createdAt: 'desc' };
-      if (sort === 'price_asc') orderBy = { price: 'asc' };
-      if (sort === 'price_desc') orderBy = { price: 'desc' };
-      if (sort === 'newest') orderBy = { createdAt: 'desc' };
-
-      [products, total] = await Promise.all([
-        prisma.product.findMany({
-          where,
-          orderBy,
-          skip,
-          take: limitNum,
-          include: { category: true },
-        }),
-        prisma.product.count({ where }),
-      ]);
+    let orderSql = search
+      ? Prisma.sql`relevance DESC, p."createdAt" DESC, p.id`
+      : Prisma.sql`p."createdAt" DESC, p.id`;
+    if (sort === 'price_asc') orderSql = Prisma.sql`p.price ASC, p."createdAt" DESC, p.id`;
+    if (sort === 'price_desc') orderSql = Prisma.sql`p.price DESC, p."createdAt" DESC, p.id`;
+    if (sort === 'newest') orderSql = Prisma.sql`p."createdAt" DESC, p.id`;
+    if (sort === 'most_reviewed') {
+      orderSql = Prisma.sql`COALESCE(r."reviewCount", 0) DESC, r."avgRating" DESC NULLS LAST, p."createdAt" DESC, p.id`;
     }
+    if (sort === 'rating') {
+      orderSql = Prisma.sql`r."avgRating" DESC NULLS LAST, COALESCE(r."reviewCount", 0) DESC, p."createdAt" DESC, p.id`;
+    }
+
+    const relevanceSql = search ? Prisma.sql`, similarity(p.name, ${search}) AS relevance` : Prisma.empty;
+
+    const products = await prisma.$queryRaw`
+      SELECT
+        p.*,
+        json_build_object('id', c.id, 'name', c.name, 'parentId', c."parentId") AS category,
+        COALESCE(r."reviewCount", 0) AS "reviewCount",
+        r."avgRating" AS "avgRating"
+        ${relevanceSql}
+      ${fromSql}
+      ${whereSql}
+      ORDER BY ${orderSql}
+      LIMIT ${limitNum} OFFSET ${skip}
+    `;
+
+    const [countRow] = await prisma.$queryRaw`
+      SELECT COUNT(*)::int AS count
+      ${fromSql}
+      ${whereSql}
+    `;
 
     res.json({
       products,
       pagination: {
         page: pageNum,
         limit: limitNum,
-        total,
+        total: countRow.count,
       },
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
-}); 
+});
 
 app.get('/api/sellers/:sellerId/products', async (req, res) => {
   try {
