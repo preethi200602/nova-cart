@@ -2181,5 +2181,71 @@ app.post('/api/admin/products/:id/restore', requireAuth, requireAdmin, async (re
   }
 });
 
+app.get('/api/seller/dashboard', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const sellerId = req.userId;
+
+    const [orders] = await prisma.$queryRaw`
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'confirmed')::int AS "toProcess",
+        COUNT(*) FILTER (WHERE status = 'processing')::int AS "toShip",
+        COUNT(*) FILTER (WHERE status = 'refund_requested')::int AS "refundRequests",
+        COALESCE(ROUND((SUM(subtotal) FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS revenue,
+        COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS payouts
+      FROM "Order"
+      WHERE "sellerId" = ${sellerId}
+    `;
+
+    const [listings] = await prisma.$queryRaw`
+      SELECT
+        COUNT(*) FILTER (WHERE state = 'active')::int AS active,
+        COUNT(*) FILTER (WHERE state = 'out_of_stock')::int AS "outOfStock",
+        COUNT(*) FILTER (WHERE state = 'draft')::int AS drafts
+      FROM "Product"
+      WHERE "sellerId" = ${sellerId}
+    `;
+
+    const [lowStockProducts, recentOrders, recentReviews] = await Promise.all([
+      prisma.product.findMany({
+        where: { sellerId, state: 'active', stock: { gt: 0, lte: 5 } },
+        select: { id: true, name: true, stock: true },
+        orderBy: { stock: 'asc' },
+        take: 5,
+      }),
+      prisma.order.findMany({
+        where: { sellerId, status: { not: 'payment_pending' } },
+        select: { id: true, status: true, subtotal: true, updatedAt: true },
+        orderBy: { updatedAt: 'desc' },
+        take: 10,
+      }),
+      prisma.review.findMany({
+        where: { product: { sellerId } },
+        select: { id: true, rating: true, createdAt: true, product: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
+    ]);
+
+    const recentActivity = [
+      ...recentOrders.map((o) => ({ type: 'order', id: o.id, status: o.status, amount: o.subtotal, at: o.updatedAt })),
+      ...recentReviews.map((r) => ({ type: 'review', id: r.id, rating: r.rating, productName: r.product.name, at: r.createdAt })),
+    ]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 10);
+
+    res.json({
+      revenue: orders.revenue,
+      payouts: orders.payouts,
+      listings: { active: listings.active, outOfStock: listings.outOfStock, drafts: listings.drafts },
+      pendingOrders: { toProcess: orders.toProcess, toShip: orders.toShip, refundRequests: orders.refundRequests },
+      lowStockProducts,
+      recentActivity,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
