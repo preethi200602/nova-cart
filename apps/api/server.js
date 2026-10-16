@@ -21,6 +21,87 @@ app.use(express.json());
 
 const prisma = new PrismaClient();
 
+async function syncStockState(productId, { notifySeller = true } = {}) {
+  try {
+    const rows = await prisma.$queryRaw`
+      UPDATE "Product"
+      SET state = CASE
+            WHEN state = 'active' AND stock <= 0 THEN 'out_of_stock'
+            ELSE 'active'
+          END,
+          "updatedAt" = NOW()
+      WHERE id = ${productId}
+        AND ((state = 'active' AND stock <= 0) OR (state = 'out_of_stock' AND stock > 0))
+      RETURNING "sellerId", name, state
+    `;
+
+    if (notifySeller && rows.length > 0 && rows[0].state === 'out_of_stock') {
+      await notify(
+        rows[0].sellerId,
+        'seller',
+        'Product out of stock',
+        `"${rows[0].name}" is now out of stock and cannot be bought until you restock it.`
+      );
+    }
+  } catch (err) {
+    console.error('syncStockState failed', err);
+  }
+}
+
+async function syncStockState(productId, { notifySeller = true } = {}) {
+  try {
+    const rows = await prisma.$queryRaw`
+      UPDATE "Product"
+      SET state = CASE
+            WHEN state = 'active' AND stock <= 0 THEN 'out_of_stock'
+            ELSE 'active'
+          END,
+          "updatedAt" = NOW()
+      WHERE id = ${productId}
+        AND ((state = 'active' AND stock <= 0) OR (state = 'out_of_stock' AND stock > 0))
+      RETURNING "sellerId", name, state
+    `;
+
+    if (notifySeller && rows.length > 0 && rows[0].state === 'out_of_stock') {
+      await notify(
+        rows[0].sellerId,
+        'seller',
+        'Product out of stock',
+        `"${rows[0].name}" is now out of stock and cannot be bought until you restock it.`
+      );
+    }
+  } catch (err) {
+    console.error('syncStockState failed', err);
+  }
+}
+
+async function syncStockState(productId, { notifySeller = true } = {}) {
+  try {
+    const rows = await prisma.$queryRaw`
+      UPDATE "Product"
+      SET state = CASE
+            WHEN state = 'active' AND stock <= 0 THEN 'out_of_stock'
+            ELSE 'active'
+          END,
+          "updatedAt" = NOW()
+      WHERE id = ${productId}
+        AND ((state = 'active' AND stock <= 0) OR (state = 'out_of_stock' AND stock > 0))
+      RETURNING "sellerId", name, state
+    `;
+
+    if (notifySeller && rows.length > 0 && rows[0].state === 'out_of_stock') {
+      await notify(
+        rows[0].sellerId,
+        'seller',
+        'Product out of stock',
+        `"${rows[0].name}" is now out of stock and cannot be bought until you restock it.`
+      );
+    }
+  } catch (err) {
+    console.error('syncStockState failed', err);
+  }
+}
+
 async function decrementStock(productId, quantity) {
   const result = await prisma.product.updateMany({
     where: {
@@ -31,6 +112,8 @@ async function decrementStock(productId, quantity) {
       stock: { decrement: quantity },
     },
   });
+
+  if (result.count > 0) await syncStockState(productId);
 
   return result.count > 0;
 }
@@ -573,10 +656,13 @@ app.put('/api/products/:id', requireAuth, requireSeller, async (req, res) => {
       return res.status(400).json({ error: 'Nothing to update' });
     }
 
-    const updated = await prisma.product.update({
+    await prisma.product.update({
       where: { id: req.params.id },
       data: cleaned.data,
     });
+
+    await syncStockState(req.params.id, { notifySeller: false });
+    const updated = await prisma.product.findUnique({ where: { id: req.params.id } });
 
     res.json(updated);
   } catch (err) {
@@ -613,7 +699,7 @@ app.post('/api/products/:id/deactivate', requireAuth, requireSeller, async (req,
 
 app.get('/api/products/:id', async (req, res) => {
   try {
-        const product = await prisma.product.findUnique({
+    const product = await prisma.product.findUnique({
       where: { id: req.params.id },
       include: {
         category: true,
@@ -633,7 +719,7 @@ app.get('/api/products/:id', async (req, res) => {
       },
     });
 
-    if (!product) {
+    if (!product || !['active', 'out_of_stock'].includes(product.state)) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
@@ -706,7 +792,7 @@ app.get('/api/products', async (req, res) => {
     `;
 
     const whereSql = Prisma.sql`
-      WHERE p.state = 'active'
+      WHERE p.state IN ('active', 'out_of_stock')
       ${categoryFilter}
       ${sellerId ? Prisma.sql`AND p."sellerId" = ${sellerId}` : Prisma.empty}
       ${min !== null ? Prisma.sql`AND p.price >= ${min}` : Prisma.empty}
@@ -769,7 +855,7 @@ app.get('/api/sellers/:sellerId/products', async (req, res) => {
     const products = await prisma.product.findMany({
       where: {
         sellerId: req.params.sellerId,
-        state: 'active',
+        state: { in: ['active', 'out_of_stock'] },
       },
       include: { category: true },
     });
@@ -2053,7 +2139,7 @@ app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, r
   }
 });
 
-const PRODUCT_STATES = ['draft', 'active', 'archived', 'removed'];
+const PRODUCT_STATES = ['draft', 'active', 'out_of_stock', 'archived', 'removed'];
 
 app.get('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   try {
