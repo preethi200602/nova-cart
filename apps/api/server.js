@@ -2308,7 +2308,7 @@ app.get('/api/seller/earnings/transactions', requireAuth, requireSeller, async (
 
     res.json({
       transactions,
-      sum: totals.sum,
+      sum: type ? totals.sum : null,
       pagination: { page: pageNum, limit: limitNum, total: totals.count },
     });
   } catch (err) {
