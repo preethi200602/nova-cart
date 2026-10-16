@@ -2247,5 +2247,75 @@ app.get('/api/seller/dashboard', requireAuth, requireSeller, async (req, res) =>
   }
 });
 
+app.get('/api/seller/earnings/summary', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const [row] = await prisma.$queryRaw`
+      SELECT
+        COUNT(*) FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)}))::int AS orders,
+        COALESCE(ROUND((SUM(subtotal) FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS "grossSales",
+        COALESCE(ROUND((SUM("platformFee") FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS "platformFees",
+        COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)})))::numeric, 2), 0)::float8 AS "netEarnings",
+        COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status = 'delivered'))::numeric, 2), 0)::float8 AS settled,
+        COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status IN ('confirmed', 'processing', 'shipped')))::numeric, 2), 0)::float8 AS "inProgress",
+        COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status = 'refund_requested'))::numeric, 2), 0)::float8 AS "atRisk",
+        COUNT(*) FILTER (WHERE status = 'refunded')::int AS "refundedOrders",
+        COALESCE(ROUND((SUM(subtotal) FILTER (WHERE status = 'refunded'))::numeric, 2), 0)::float8 AS "refundedSales"
+      FROM "Order"
+      WHERE "sellerId" = ${req.userId}
+    `;
+
+    res.json({
+      orders: row.orders,
+      grossSales: row.grossSales,
+      platformFees: row.platformFees,
+      netEarnings: row.netEarnings,
+      breakdown: { settled: row.settled, inProgress: row.inProgress, atRisk: row.atRisk },
+      refunded: { orders: row.refundedOrders, sales: row.refundedSales },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+const TRANSACTION_TYPES = ['payment', 'platform_fee', 'payout', 'refund', 'payment_failed'];
+
+app.get('/api/seller/earnings/transactions', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const pageNum = Math.max(parseInt(req.query.page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+    const skip = (pageNum - 1) * limitNum;
+    const type = TRANSACTION_TYPES.includes(req.query.type) ? req.query.type : null;
+    const typeFilter = type ? Prisma.sql`AND t.type = ${type}` : Prisma.empty;
+
+    const transactions = await prisma.$queryRaw`
+      SELECT t.id, t."orderId", t.type, ROUND(t.amount::numeric, 2)::float8 AS amount, t."createdAt"
+      FROM "Transaction" t
+      JOIN "Order" o ON o.id = t."orderId"
+      WHERE o."sellerId" = ${req.userId}
+      ${typeFilter}
+      ORDER BY t."createdAt" DESC, t.id
+      LIMIT ${limitNum} OFFSET ${skip}
+    `;
+
+    const [totals] = await prisma.$queryRaw`
+      SELECT COUNT(*)::int AS count, COALESCE(ROUND(SUM(t.amount)::numeric, 2), 0)::float8 AS sum
+      FROM "Transaction" t
+      JOIN "Order" o ON o.id = t."orderId"
+      WHERE o."sellerId" = ${req.userId}
+      ${typeFilter}
+    `;
+
+    res.json({
+      transactions,
+      sum: totals.sum,
+      pagination: { page: pageNum, limit: limitNum, total: totals.count },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
