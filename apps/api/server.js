@@ -564,64 +564,93 @@ app.get('/api/products/:id', async (req, res) => {
   }
 });
 
+async function categoryWithDescendants(categoryId) {
+  const rows = await prisma.$queryRaw`
+    WITH RECURSIVE tree AS (
+      SELECT id FROM "Category" WHERE id = ${categoryId}
+      UNION
+      SELECT c.id FROM "Category" c JOIN tree t ON c."parentId" = t.id
+    )
+    SELECT id FROM tree
+  `;
+  return rows.map((r) => r.id);
+}
+
 app.get('/api/products', async (req, res) => {
   try {
-    const {
-      q,
-      category,
-      minPrice,
-      maxPrice,
-      seller,
-      sort,
-      page = 1,
-      limit = 20,
-    } = req.query;
+    const { q, category, minPrice, maxPrice, seller, sort } = req.query;
 
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
+    const pageNum = Math.max(parseInt(req.query.page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
     const skip = (pageNum - 1) * limitNum;
 
-    const where = { state: 'active' };
+    const parsedMin = parseFloat(minPrice);
+    const parsedMax = parseFloat(maxPrice);
+    const min = Number.isFinite(parsedMin) ? parsedMin : null;
+    const max = Number.isFinite(parsedMax) ? parsedMax : null;
 
-    if (category) where.categoryId = category;
-    if (seller) where.sellerId = seller;
-    if (minPrice || maxPrice) {
-      where.price = {};
-      if (minPrice) where.price.gte = parseFloat(minPrice);
-      if (maxPrice) where.price.lte = parseFloat(maxPrice);
-    }
-
-    let orderBy = { createdAt: 'desc' };
-    if (sort === 'price_asc') orderBy = { price: 'asc' };
-    if (sort === 'price_desc') orderBy = { price: 'desc' };
-    if (sort === 'newest') orderBy = { createdAt: 'desc' };
+    const categoryIds = category ? await categoryWithDescendants(String(category)) : null;
+    const sellerId = seller ? String(seller) : null;
+    const search = typeof q === 'string' ? q.trim() : '';
 
     let products;
     let total;
 
-    if (q) {
-      const searchCondition = Prisma.sql`
+    if (search) {
+      const likePattern = '%' + search.replace(/[\\%_]/g, '\\$&') + '%';
+
+      const categoryFilter = categoryIds
+        ? categoryIds.length > 0
+          ? Prisma.sql`AND "categoryId" IN (${Prisma.join(categoryIds)})`
+          : Prisma.sql`AND FALSE`
+        : Prisma.empty;
+
+      const filters = Prisma.sql`
+        state = 'active'
+        ${categoryFilter}
+        ${sellerId ? Prisma.sql`AND "sellerId" = ${sellerId}` : Prisma.empty}
+        ${min !== null ? Prisma.sql`AND price >= ${min}` : Prisma.empty}
+        ${max !== null ? Prisma.sql`AND price <= ${max}` : Prisma.empty}
         AND (
-          similarity(name, ${q}) > 0.15
-          OR similarity(description, ${q}) > 0.1
-          OR name ILIKE ${'%' + q + '%'}
+          similarity(name, ${search}) > 0.15
+          OR similarity(description, ${search}) > 0.1
+          OR name ILIKE ${likePattern}
         )
       `;
 
+      let orderSql = Prisma.sql`relevance DESC, "createdAt" DESC`;
+      if (sort === 'price_asc') orderSql = Prisma.sql`price ASC, relevance DESC`;
+      if (sort === 'price_desc') orderSql = Prisma.sql`price DESC, relevance DESC`;
+      if (sort === 'newest') orderSql = Prisma.sql`"createdAt" DESC, relevance DESC`;
+
       products = await prisma.$queryRaw`
-        SELECT *, similarity(name, ${q}) as relevance
+        SELECT *, similarity(name, ${search}) AS relevance
         FROM "Product"
-        WHERE state = 'active'
-        ${category ? Prisma.sql`AND "categoryId" = ${category}` : Prisma.empty}
-        ${seller ? Prisma.sql`AND "sellerId" = ${seller}` : Prisma.empty}
-        ${minPrice ? Prisma.sql`AND price >= ${parseFloat(minPrice)}` : Prisma.empty}
-        ${maxPrice ? Prisma.sql`AND price <= ${parseFloat(maxPrice)}` : Prisma.empty}
-        ${searchCondition}
-        ORDER BY relevance DESC
+        WHERE ${filters}
+        ORDER BY ${orderSql}
         LIMIT ${limitNum} OFFSET ${skip}
       `;
-      total = products.length;
+
+      const [countRow] = await prisma.$queryRaw`
+        SELECT COUNT(*)::int AS count FROM "Product" WHERE ${filters}
+      `;
+      total = countRow.count;
     } else {
+      const where = { state: 'active' };
+
+      if (categoryIds) where.categoryId = { in: categoryIds };
+      if (sellerId) where.sellerId = sellerId;
+      if (min !== null || max !== null) {
+        where.price = {};
+        if (min !== null) where.price.gte = min;
+        if (max !== null) where.price.lte = max;
+      }
+
+      let orderBy = { createdAt: 'desc' };
+      if (sort === 'price_asc') orderBy = { price: 'asc' };
+      if (sort === 'price_desc') orderBy = { price: 'desc' };
+      if (sort === 'newest') orderBy = { createdAt: 'desc' };
+
       [products, total] = await Promise.all([
         prisma.product.findMany({
           where,
@@ -646,7 +675,7 @@ app.get('/api/products', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
-});
+}); 
 
 app.get('/api/sellers/:sellerId/products', async (req, res) => {
   try {
