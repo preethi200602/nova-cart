@@ -48,60 +48,6 @@ async function syncStockState(productId, { notifySeller = true } = {}) {
   }
 }
 
-async function syncStockState(productId, { notifySeller = true } = {}) {
-  try {
-    const rows = await prisma.$queryRaw`
-      UPDATE "Product"
-      SET state = CASE
-            WHEN state = 'active' AND stock <= 0 THEN 'out_of_stock'
-            ELSE 'active'
-          END,
-          "updatedAt" = NOW()
-      WHERE id = ${productId}
-        AND ((state = 'active' AND stock <= 0) OR (state = 'out_of_stock' AND stock > 0))
-      RETURNING "sellerId", name, state
-    `;
-
-    if (notifySeller && rows.length > 0 && rows[0].state === 'out_of_stock') {
-      await notify(
-        rows[0].sellerId,
-        'seller',
-        'Product out of stock',
-        `"${rows[0].name}" is now out of stock and cannot be bought until you restock it.`
-      );
-    }
-  } catch (err) {
-    console.error('syncStockState failed', err);
-  }
-}
-
-async function syncStockState(productId, { notifySeller = true } = {}) {
-  try {
-    const rows = await prisma.$queryRaw`
-      UPDATE "Product"
-      SET state = CASE
-            WHEN state = 'active' AND stock <= 0 THEN 'out_of_stock'
-            ELSE 'active'
-          END,
-          "updatedAt" = NOW()
-      WHERE id = ${productId}
-        AND ((state = 'active' AND stock <= 0) OR (state = 'out_of_stock' AND stock > 0))
-      RETURNING "sellerId", name, state
-    `;
-
-    if (notifySeller && rows.length > 0 && rows[0].state === 'out_of_stock') {
-      await notify(
-        rows[0].sellerId,
-        'seller',
-        'Product out of stock',
-        `"${rows[0].name}" is now out of stock and cannot be bought until you restock it.`
-      );
-    }
-  } catch (err) {
-    console.error('syncStockState failed', err);
-  }
-}
-
 async function decrementStock(productId, quantity) {
   const result = await prisma.product.updateMany({
     where: {
