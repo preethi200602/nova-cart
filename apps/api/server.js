@@ -1081,6 +1081,7 @@ app.get('/api/orders', requireAuth, async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
       where: { buyerId: req.userId },
+      omit: { platformFee: true, payoutAmount: true },
       include: { items: { include: { product: { select: { name: true, images: true } } } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -1567,13 +1568,20 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
 app.get('/api/orders/:id/transactions', requireAuth, async (req, res) => {
   try {
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    const viewer = await prisma.user.findUnique({ where: { id: req.userId }, select: { isAdmin: true } });
+    const isAdmin = !!(viewer && viewer.isAdmin);
 
-    if (!order || (order.buyerId !== req.userId && order.sellerId !== req.userId)) {
+    if (!order || (order.buyerId !== req.userId && order.sellerId !== req.userId && !isAdmin)) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
+    const sellerSide = isAdmin || order.sellerId === req.userId;
+
     const transactions = await prisma.transaction.findMany({
-      where: { orderId: req.params.id },
+      where: {
+        orderId: req.params.id,
+        ...(sellerSide ? {} : { type: { in: ['payment', 'payment_failed', 'refund'] } }),
+      },
       orderBy: { createdAt: 'asc' },
     });
 
@@ -2310,6 +2318,63 @@ app.get('/api/seller/earnings/transactions', requireAuth, requireSeller, async (
       transactions,
       sum: type ? totals.sum : null,
       pagination: { page: pageNum, limit: limitNum, total: totals.count },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.get('/api/orders/:id', requireAuth, async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: { items: { include: { product: { select: { name: true, images: true } } } } },
+    });
+    const viewer = await prisma.user.findUnique({ where: { id: req.userId }, select: { isAdmin: true } });
+    const isAdmin = !!(viewer && viewer.isAdmin);
+
+    if (!order || (order.buyerId !== req.userId && order.sellerId !== req.userId && !isAdmin)) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const viewerRole = isAdmin ? 'admin' : order.sellerId === req.userId ? 'seller' : 'buyer';
+    const sellerSide = viewerRole !== 'buyer';
+
+    const [seller, buyer] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: order.sellerId },
+        select: { id: true, name: true, store: true },
+      }),
+      sellerSide
+        ? prisma.user.findUnique({ where: { id: order.buyerId }, select: { id: true, name: true } })
+        : null,
+    ]);
+
+    res.json({
+      id: order.id,
+      status: order.status,
+      subtotal: order.subtotal,
+      deliveryAddress: order.deliveryAddress,
+      trackingInfo: order.trackingInfo,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      deliveredAt: order.deliveredAt,
+      refundRequestedAt: order.refundRequestedAt,
+      refundReason: order.refundReason,
+      refundRejectionReason: order.refundRejectionReason,
+      items: order.items.map((i) => ({
+        id: i.id,
+        productId: i.productId,
+        name: i.product ? i.product.name : null,
+        image: i.product && i.product.images ? i.product.images[0] || null : null,
+        quantity: i.quantity,
+        price: i.price,
+        lineTotal: Math.round(i.price * i.quantity * 100) / 100,
+      })),
+      seller,
+      ...(sellerSide ? { buyer, platformFee: order.platformFee, payoutAmount: order.payoutAmount } : {}),
+      viewerRole,
     });
   } catch (err) {
     console.error(err);
