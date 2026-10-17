@@ -135,6 +135,8 @@ model Order {
   payoutStatus      String    @default("pending")
   payoutPaidAt      DateTime?
   payoutReference   String?
+  razorpayOrderId   String?
+  razorpayPaymentId String?   @unique
 }
 
 model OrderItem {

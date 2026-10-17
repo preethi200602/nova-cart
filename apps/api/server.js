@@ -1369,8 +1369,6 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
-      console.log('EXPECTED:', expectedSignature);
-      console.log('RECEIVED:', razorpay_signature);
 
     if (expectedSignature !== razorpay_signature) {
       await prisma.transaction.create({
