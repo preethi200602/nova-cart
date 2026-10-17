@@ -1232,6 +1232,26 @@ app.get('/api/orders', requireAuth, async (req, res) => {
   }
 });
 
+function forBuyer(order) {
+  const {
+    platformFee,
+    payoutAmount,
+    payoutStatus,
+    payoutPaidAt,
+    payoutReference,
+    razorpayOrderId,
+    razorpayPaymentId,
+    ...rest
+  } = order;
+  return rest;
+}
+
+function signaturesMatch(expected, received) {
+  const a = Buffer.from(expected);
+  const b = Buffer.from(received);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 app.post('/api/orders/:id/create-payment', requireAuth, async (req, res) => {
   try {
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
@@ -1244,16 +1264,33 @@ app.post('/api/orders/:id/create-payment', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'This order is not awaiting payment' });
     }
 
-    const razorpayOrder = await razorpay.orders.create({
-      amount: Math.round(order.subtotal * 100),
-      currency: 'INR',
-      receipt: order.id,
-    });
+    const amount = Math.round(order.subtotal * 100);
+    let razorpayOrderId = order.razorpayOrderId;
+
+    // One Razorpay order per order: reuse it if it was already created.
+    if (!razorpayOrderId) {
+      const razorpayOrder = await razorpay.orders.create({
+        amount,
+        currency: 'INR',
+        receipt: order.id,
+      });
+
+      await prisma.order.updateMany({
+        where: { id: order.id, razorpayOrderId: null },
+        data: { razorpayOrderId: razorpayOrder.id },
+      });
+
+      const fresh = await prisma.order.findUnique({
+        where: { id: order.id },
+        select: { razorpayOrderId: true },
+      });
+      razorpayOrderId = fresh.razorpayOrderId;
+    }
 
     res.json({
-      razorpayOrderId: razorpayOrder.id,
-      amount: razorpayOrder.amount,
-      currency: razorpayOrder.currency,
+      razorpayOrderId,
+      amount,
+      currency: 'INR',
       keyId: process.env.RAZORPAY_KEY_ID,
     });
   } catch (err) {
@@ -1349,7 +1386,17 @@ app.post('/api/products/:id/reviews', requireAuth, async (req, res) => {
 
 app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    const body = req.body || {};
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = body;
+
+    const fieldsOk = [razorpay_order_id, razorpay_payment_id, razorpay_signature].every(
+      (v) => typeof v === 'string' && v.length > 0 && v.length <= 200
+    );
+    if (!fieldsOk) {
+      return res
+        .status(400)
+        .json({ error: 'razorpay_order_id, razorpay_payment_id and razorpay_signature are required' });
+    }
 
     const order = await prisma.order.findUnique({
       where: { id: req.params.id },
@@ -1360,8 +1407,18 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Order not found' });
     }
 
+    // A repeated request for a payment that already went through is safe.
+    if (order.status === 'confirmed' && order.razorpayPaymentId === razorpay_payment_id) {
+      return res.json({ message: 'Payment already confirmed', order: forBuyer(order) });
+    }
+
     if (order.status !== 'payment_pending') {
       return res.status(400).json({ error: 'This order is not awaiting payment' });
+    }
+
+    // The payment must belong to this order's own Razorpay order.
+    if (!order.razorpayOrderId || order.razorpayOrderId !== razorpay_order_id) {
+      return res.status(400).json({ error: 'This payment does not belong to this order' });
     }
 
     const expectedSignature = crypto
@@ -1369,45 +1426,109 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
-
-    if (expectedSignature !== razorpay_signature) {
+    if (!signaturesMatch(expectedSignature, razorpay_signature)) {
       await prisma.transaction.create({
         data: { orderId: order.id, type: 'payment_failed', amount: order.subtotal },
       });
       return res.status(400).json({ error: 'Payment verification failed' });
     }
 
-        for (const item of order.items) {
-      const success = await decrementStock(item.productId, item.quantity);
-      if (!success) {
-        return res.status(409).json({
-          error: `Payment verified, but ${item.productId} is now out of stock. Please contact support for a refund.`,
-        });
-      }
-    }
-
     const feePercent = parseFloat(process.env.PLATFORM_FEE_PERCENT) / 100;
+    if (!Number.isFinite(feePercent)) {
+      console.error('PLATFORM_FEE_PERCENT is missing or not a number');
+      return res.status(500).json({ error: 'Something went wrong' });
+    }
     const platformFee = Math.round(order.subtotal * feePercent * 100) / 100;
     const payoutAmount = Math.round((order.subtotal - platformFee) * 100) / 100;
 
-    const updatedOrder = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        status: 'confirmed',
-        platformFee,
-        payoutAmount,
-      },
-    });
+    let confirmedOrder = null;
+    let outOfStock = false;
 
-    await prisma.transaction.createMany({
-      data: [
-        { orderId: order.id, type: 'payment', amount: order.subtotal },
-        { orderId: order.id, type: 'platform_fee', amount: platformFee },
-        { orderId: order.id, type: 'payout', amount: payoutAmount },
-      ],
-    });
+    try {
+      // Claim the order, take the stock and write the ledger together, or do none of it.
+      confirmedOrder = await prisma.$transaction(async (tx) => {
+        const claimed = await tx.order.updateMany({
+          where: { id: order.id, status: 'payment_pending' },
+          data: {
+            status: 'confirmed',
+            platformFee,
+            payoutAmount,
+            razorpayPaymentId: razorpay_payment_id,
+          },
+        });
+        if (claimed.count === 0) {
+          const e = new Error('Order already processed');
+          e.code = 'ALREADY_PROCESSED';
+          throw e;
+        }
 
-        await notify(
+        for (const item of order.items) {
+          const taken = await tx.product.updateMany({
+            where: { id: item.productId, stock: { gte: item.quantity } },
+            data: { stock: { decrement: item.quantity } },
+          });
+          if (taken.count === 0) {
+            const e = new Error('Out of stock');
+            e.code = 'OUT_OF_STOCK';
+            throw e;
+          }
+        }
+
+        await tx.transaction.createMany({
+          data: [
+            { orderId: order.id, type: 'payment', amount: order.subtotal },
+            { orderId: order.id, type: 'platform_fee', amount: platformFee },
+            { orderId: order.id, type: 'payout', amount: payoutAmount },
+          ],
+        });
+
+        return tx.order.findUnique({ where: { id: order.id }, include: { items: true } });
+      });
+    } catch (err) {
+      if (err.code === 'ALREADY_PROCESSED') {
+        return res.status(409).json({ error: 'This order is already being processed' });
+      }
+      if (err.code === 'P2002') {
+        return res.status(409).json({ error: 'This payment was already used for another order' });
+      }
+      if (err.code !== 'OUT_OF_STOCK') throw err;
+      outOfStock = true;
+    }
+
+    if (outOfStock) {
+      // The money was taken but the goods are gone: cancel and record the refund owed.
+      await prisma.$transaction(async (tx) => {
+        const cancelled = await tx.order.updateMany({
+          where: { id: order.id, status: 'payment_pending' },
+          data: { status: 'cancelled', razorpayPaymentId: razorpay_payment_id },
+        });
+        if (cancelled.count === 1) {
+          await tx.transaction.createMany({
+            data: [
+              { orderId: order.id, type: 'payment', amount: order.subtotal },
+              { orderId: order.id, type: 'refund', amount: -order.subtotal },
+            ],
+          });
+        }
+      });
+
+      await notify(
+        order.buyerId,
+        'refunds',
+        'Order cancelled',
+        `Your payment of ₹${order.subtotal} was received, but an item went out of stock. The order was cancelled and a refund is due.`
+      );
+
+      return res.status(409).json({
+        error: 'Payment verified, but an item went out of stock. The order was cancelled and a refund is due.',
+      });
+    }
+
+    for (const item of order.items) {
+      await syncStockState(item.productId);
+    }
+
+    await notify(
       order.buyerId,
       'orders',
       'Order confirmed',
@@ -1420,7 +1541,7 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       `You have a new paid order worth ₹${order.subtotal}. Please start preparing it.`
     );
 
-    res.json({ message: 'Payment confirmed', order: updatedOrder });
+    res.json({ message: 'Payment confirmed', order: forBuyer(confirmedOrder) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
