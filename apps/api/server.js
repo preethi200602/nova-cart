@@ -1035,12 +1035,123 @@ app.delete('/api/cart/items/:id', requireAuth, async (req, res) => {
   }
 });
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
+function formatAddress(a) {
+  return (
+    [a.fullName, a.line1, a.line2, a.city, `${a.state} ${a.postalCode}`, a.country].filter(Boolean).join(', ') +
+    `. Phone: ${a.phone}`
+  );
+}
+
+async function resolveDeliveryAddress(userId, body) {
+  if (body.addressId !== undefined && body.addressId !== null) {
+    const address =
+      typeof body.addressId === 'string'
+        ? await prisma.address.findFirst({ where: { id: body.addressId, userId } })
+        : null;
+    if (!address) return { error: 'Saved address not found' };
+    return { text: formatAddress(address), addressId: address.id };
+  }
+
+  if (body.deliveryAddress !== undefined && body.deliveryAddress !== null) {
+    const text = typeof body.deliveryAddress === 'string' ? body.deliveryAddress.trim() : '';
+    if (text.length < 5 || text.length > 500) {
+      return { error: 'deliveryAddress must be 5 to 500 characters' };
+    }
+    return { text };
+  }
+
+  const fallback = await prisma.address.findFirst({ where: { userId, isDefault: true } });
+  if (fallback) return { text: formatAddress(fallback), addressId: fallback.id };
+
+  return { error: 'Provide addressId or deliveryAddress, or save a default address' };
+}
+
+function buildCartSummary(items) {
+  const issues = [];
+  const groups = new Map();
+
+  for (const item of items) {
+    const p = item.product;
+
+    if (p.state !== 'active') {
+      issues.push({ productId: p.id, name: p.name, problem: 'unavailable' });
+    } else if (p.stock < item.quantity) {
+      issues.push({
+        productId: p.id,
+        name: p.name,
+        problem: 'insufficient_stock',
+        available: p.stock,
+        requested: item.quantity,
+      });
+    }
+
+    if (!groups.has(p.sellerId)) {
+      groups.set(p.sellerId, {
+        sellerId: p.sellerId,
+        sellerName: p.seller ? p.seller.name : null,
+        items: [],
+        subtotal: 0,
+      });
+    }
+
+    const unitPrice = p.salePrice || p.price;
+    const lineTotal = round2(unitPrice * item.quantity);
+    const group = groups.get(p.sellerId);
+    group.items.push({
+      productId: p.id,
+      name: p.name,
+      image: (p.images && p.images[0]) || null,
+      quantity: item.quantity,
+      unitPrice,
+      lineTotal,
+    });
+    group.subtotal = round2(group.subtotal + lineTotal);
+  }
+
+  const sellers = [...groups.values()];
+  const total = round2(sellers.reduce((sum, g) => sum + g.subtotal, 0));
+
+  return { sellers, total, issues };
+}
+
+app.post('/api/checkout/preview', requireAuth, async (req, res) => {
+  try {
+    const cart = await prisma.cart.findUnique({
+      where: { buyerId: req.userId },
+      include: {
+        items: { include: { product: { include: { seller: { select: { id: true, name: true } } } } } },
+      },
+    });
+
+    if (!cart || cart.items.length === 0) {
+      return res.status(400).json({ error: 'Cart is empty' });
+    }
+
+    const summary = buildCartSummary(cart.items);
+    const address = await resolveDeliveryAddress(req.userId, req.body || {});
+
+    res.json({
+      sellers: summary.sellers,
+      total: summary.total,
+      orderCount: summary.sellers.length,
+      deliveryAddress: address.text || null,
+      addressProblem: address.error || null,
+      issues: summary.issues,
+      canCheckout: summary.issues.length === 0 && !!address.text,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 app.post('/api/checkout', requireAuth, async (req, res) => {
   try {
-    const { deliveryAddress } = req.body;
-
-    if (!deliveryAddress) {
-      return res.status(400).json({ error: 'deliveryAddress is required' });
+    const address = await resolveDeliveryAddress(req.userId, req.body || {});
+    if (address.error) {
+      return res.status(400).json({ error: address.error });
     }
 
     const cart = await prisma.cart.findUnique({
@@ -1052,64 +1163,45 @@ app.post('/api/checkout', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Cart is empty' });
     }
 
-    // Re-check every item is still valid before touching anything
-    for (const item of cart.items) {
-      if (item.product.state !== 'active') {
-        return res.status(400).json({ error: `${item.product.name} is no longer available` });
-      }
-      if (item.product.stock < item.quantity) {
-        return res.status(400).json({ error: `Not enough stock for ${item.product.name}` });
-      }
+    const summary = buildCartSummary(cart.items);
+    if (summary.issues.length > 0) {
+      const first = summary.issues[0];
+      const message =
+        first.problem === 'unavailable'
+          ? `${first.name} is no longer available`
+          : `Not enough stock for ${first.name}`;
+      return res.status(400).json({ error: message });
     }
 
-    // Group cart items by seller
-    const itemsBySeller = {};
-    for (const item of cart.items) {
-      const sellerId = item.product.sellerId;
-      if (!itemsBySeller[sellerId]) itemsBySeller[sellerId] = [];
-      itemsBySeller[sellerId].push(item);
-    }
+    // Stock is decremented on payment confirmation, not here.
+    // All orders and the cart clear happen together or not at all.
+    const createdOrders = await prisma.$transaction(async (tx) => {
+      const orders = [];
 
-    const createdOrders = [];
-
-    for (const sellerId of Object.keys(itemsBySeller)) {
-      const sellerItems = itemsBySeller[sellerId];
-
-            // Check stock is sufficient (actual decrement happens on payment confirmation, not here)
-      for (const item of sellerItems) {
-        if (item.product.stock < item.quantity) {
-          return res.status(409).json({ error: `${item.product.name} just went out of stock. Please update your cart.` });
-        }
-      }
-
-      const subtotal = sellerItems.reduce((sum, item) => {
-        const price = item.product.salePrice || item.product.price;
-        return sum + price * item.quantity;
-      }, 0);
-
-      const order = await prisma.order.create({
-        data: {
-          buyerId: req.userId,
-          sellerId,
-          deliveryAddress,
-          subtotal,
-          status: 'payment_pending',
-          items: {
-            create: sellerItems.map((item) => ({
-              productId: item.productId,
-              quantity: item.quantity,
-              price: item.product.salePrice || item.product.price,
-            })),
+      for (const group of summary.sellers) {
+        const order = await tx.order.create({
+          data: {
+            buyerId: req.userId,
+            sellerId: group.sellerId,
+            deliveryAddress: address.text,
+            subtotal: group.subtotal,
+            status: 'payment_pending',
+            items: {
+              create: group.items.map((item) => ({
+                productId: item.productId,
+                quantity: item.quantity,
+                price: item.unitPrice,
+              })),
+            },
           },
-        },
-        include: { items: true },
-      });
+          include: { items: true },
+        });
+        orders.push(order);
+      }
 
-      createdOrders.push(order);
-    }
-
-    // Clear the cart now that orders are created
-    await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+      await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      return orders;
+    });
 
     res.status(201).json({ message: 'Orders created', orders: createdOrders });
   } catch (err) {
