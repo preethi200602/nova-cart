@@ -21,6 +21,13 @@ app.use(express.json());
 
 const prisma = new PrismaClient();
 
+const RETURN_WINDOW_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function payoutEligibleAt(order) {
+  return order.deliveredAt ? new Date(new Date(order.deliveredAt).getTime() + RETURN_WINDOW_DAYS * DAY_MS) : null;
+}
+
 async function syncStockState(productId, { notifySeller = true } = {}) {
   try {
     const rows = await prisma.$queryRaw`
@@ -1436,7 +1443,6 @@ app.post('/api/orders/:id/request-refund', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Only delivered orders can be refunded' });
     }
 
-    const RETURN_WINDOW_DAYS = 7;
     const deliveredDate = new Date(order.deliveredAt);
     const daysSinceDelivery = (Date.now() - deliveredDate.getTime()) / (1000 * 60 * 60 * 24);
 
@@ -2399,6 +2405,7 @@ app.get('/api/seller/earnings/summary', requireAuth, requireSeller, async (req, 
         COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status = 'delivered'))::numeric, 2), 0)::float8 AS settled,
         COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status IN ('confirmed', 'processing', 'shipped')))::numeric, 2), 0)::float8 AS "inProgress",
         COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status = 'refund_requested'))::numeric, 2), 0)::float8 AS "atRisk",
+        COALESCE(ROUND((SUM("payoutAmount") FILTER (WHERE status IN (${Prisma.join(PAID_KEPT_STATUSES)}) AND "payoutStatus" = 'paid'))::numeric, 2), 0)::float8 AS "paidOut",
         COUNT(*) FILTER (WHERE status = 'refunded')::int AS "refundedOrders",
         COALESCE(ROUND((SUM(subtotal) FILTER (WHERE status = 'refunded'))::numeric, 2), 0)::float8 AS "refundedSales"
       FROM "Order"
@@ -2411,6 +2418,7 @@ app.get('/api/seller/earnings/summary', requireAuth, requireSeller, async (req, 
       platformFees: row.platformFees,
       netEarnings: row.netEarnings,
       breakdown: { settled: row.settled, inProgress: row.inProgress, atRisk: row.atRisk },
+      payouts: { paid: row.paidOut, unpaid: round2(row.netEarnings - row.paidOut) },
       refunded: { orders: row.refundedOrders, sales: row.refundedSales },
     });
   } catch (err) {
@@ -2506,7 +2514,16 @@ app.get('/api/orders/:id', requireAuth, async (req, res) => {
         lineTotal: Math.round(i.price * i.quantity * 100) / 100,
       })),
       seller,
-      ...(sellerSide ? { buyer, platformFee: order.platformFee, payoutAmount: order.payoutAmount } : {}),
+      ...(sellerSide
+        ? {
+            buyer,
+            platformFee: order.platformFee,
+            payoutAmount: order.payoutAmount,
+            payoutStatus: order.payoutStatus,
+            payoutPaidAt: order.payoutPaidAt,
+            payoutReference: order.payoutReference,
+          }
+        : {}),
       viewerRole,
     });
   } catch (err) {
@@ -2660,6 +2677,118 @@ app.delete('/api/addresses/:id', requireAuth, async (req, res) => {
     });
 
     res.json({ message: 'Address deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+const PAYOUT_SELECT = {
+  id: true,
+  sellerId: true,
+  status: true,
+  subtotal: true,
+  platformFee: true,
+  payoutAmount: true,
+  deliveredAt: true,
+  payoutStatus: true,
+  payoutPaidAt: true,
+  payoutReference: true,
+  seller: { select: { id: true, name: true } },
+};
+
+app.get('/api/admin/payouts', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const pageNum = Math.max(parseInt(req.query.page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+    const payoutStatus = ['pending', 'paid'].includes(req.query.status) ? req.query.status : null;
+    const onlyEligible = req.query.eligible === 'true';
+    const cutoff = new Date(Date.now() - RETURN_WINDOW_DAYS * DAY_MS);
+
+    const where = { status: { in: PAID_KEPT_STATUSES } };
+    if (payoutStatus) where.payoutStatus = payoutStatus;
+    if (onlyEligible) {
+      where.status = 'delivered';
+      where.payoutStatus = 'pending';
+      where.deliveredAt = { lt: cutoff };
+    }
+
+    const [orders, total, sum] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        select: PAYOUT_SELECT,
+        orderBy: [{ deliveredAt: 'asc' }, { createdAt: 'asc' }],
+        skip: (pageNum - 1) * limitNum,
+        take: limitNum,
+      }),
+      prisma.order.count({ where }),
+      prisma.order.aggregate({ where, _sum: { payoutAmount: true } }),
+    ]);
+
+    const payouts = orders.map((o) => {
+      const eligibleAt = payoutEligibleAt(o);
+      return {
+        ...o,
+        eligibleAt,
+        eligible: o.status === 'delivered' && o.payoutStatus === 'pending' && !!eligibleAt && eligibleAt.getTime() < Date.now(),
+      };
+    });
+
+    res.json({
+      payouts,
+      totalPayoutAmount: round2(sum._sum.payoutAmount || 0),
+      pagination: { page: pageNum, limit: limitNum, total },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/admin/orders/:id/mark-payout-paid', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const reference = typeof body.reference === 'string' ? body.reference.trim() : '';
+    if (reference.length > 100) {
+      return res.status(400).json({ error: 'Reference must be 100 characters or fewer' });
+    }
+
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    if (order.payoutStatus === 'paid') {
+      return res.status(409).json({ error: 'Payout is already marked as paid' });
+    }
+    if (order.status !== 'delivered') {
+      return res.status(400).json({ error: `Only delivered orders can be paid out (this order is "${order.status}")` });
+    }
+    if (order.payoutAmount === null || order.payoutAmount === undefined) {
+      return res.status(400).json({ error: 'This order has no payout amount' });
+    }
+
+    const eligibleAt = payoutEligibleAt(order);
+    if (!eligibleAt || eligibleAt.getTime() >= Date.now()) {
+      const when = eligibleAt ? eligibleAt.toISOString().slice(0, 10) : 'an unknown date';
+      return res.status(400).json({ error: `Payout is held until the return window ends on ${when}` });
+    }
+
+    const result = await prisma.order.updateMany({
+      where: { id: order.id, status: 'delivered', payoutStatus: 'pending' },
+      data: { payoutStatus: 'paid', payoutPaidAt: new Date(), payoutReference: reference || null },
+    });
+    if (result.count === 0) {
+      return res.status(409).json({ error: 'The order changed while processing. Please try again.' });
+    }
+
+    await notify(
+      order.sellerId,
+      'seller',
+      'Payout paid',
+      `Your payout of ₹${order.payoutAmount.toFixed(2)} for order ${order.id.slice(0, 8)} has been marked as paid.${reference ? ' Reference: ' + reference : ''}`
+    );
+
+    const updated = await prisma.order.findUnique({ where: { id: order.id }, select: PAYOUT_SELECT });
+    res.json(updated);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
