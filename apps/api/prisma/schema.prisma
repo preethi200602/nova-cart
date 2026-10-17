@@ -132,6 +132,9 @@ model Order {
   trackingInfo    String?
     reviews   Review[]
   refundRejectionReason String?
+  payoutStatus      String    @default("pending")
+  payoutPaidAt      DateTime?
+  payoutReference   String?
 }
 
 model OrderItem {
