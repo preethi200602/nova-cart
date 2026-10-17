@@ -2795,5 +2795,51 @@ app.post('/api/admin/orders/:id/mark-payout-paid', requireAuth, requireAdmin, as
   }
 });
 
+const UNPAID_ORDER_TTL_HOURS = 24;
+const EXPIRY_INTERVAL_MS = 15 * 60 * 1000;
+
+async function expireUnpaidOrders() {
+  const cutoff = new Date(Date.now() - UNPAID_ORDER_TTL_HOURS * 60 * 60 * 1000);
+
+  const stale = await prisma.order.findMany({
+    where: { status: 'payment_pending', createdAt: { lt: cutoff } },
+    select: { id: true, buyerId: true },
+  });
+
+  let expired = 0;
+  for (const order of stale) {
+    const result = await prisma.order.updateMany({
+      where: { id: order.id, status: 'payment_pending' },
+      data: { status: 'cancelled' },
+    });
+    if (result.count === 1) {
+      expired += 1;
+      await notify(
+        order.buyerId,
+        'orders',
+        'Order expired',
+        `Order ${order.id.slice(0, 8)} was cancelled because payment was not completed within ${UNPAID_ORDER_TTL_HOURS} hours.`
+      );
+    }
+  }
+
+  return expired;
+}
+
+app.post('/api/admin/orders/expire-unpaid', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const expired = await expireUnpaidOrders();
+    res.json({ expired, ttlHours: UNPAID_ORDER_TTL_HOURS });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+const expiryTimer = setInterval(() => {
+  expireUnpaidOrders().catch((err) => console.error('expireUnpaidOrders failed', err));
+}, EXPIRY_INTERVAL_MS);
+expiryTimer.unref();
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
