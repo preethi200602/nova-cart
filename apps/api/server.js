@@ -21,6 +21,34 @@ const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 
+const pino = require('pino');
+const pinoHttp = require('pino-http');
+const { randomUUID } = require('crypto');
+
+const isProduction = process.env.NODE_ENV === 'production';
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  redact: {
+    paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
+    censor: '[hidden]',
+  },
+  ...(isProduction ? {} : { transport: { target: 'pino-pretty' } }),
+});
+
+app.use(
+  pinoHttp({
+    logger,
+    genReqId: (req, res) => {
+      const incoming = req.headers['x-request-id'];
+      const id =
+        typeof incoming === 'string' && incoming.length > 0 && incoming.length <= 100 ? incoming : randomUUID();
+      res.setHeader('X-Request-Id', id);
+      return id;
+    },
+    autoLogging: { ignore: (req) => req.url === '/health' },
+  })
+);
+
 app.disable('x-powered-by');
 app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 
@@ -130,8 +158,20 @@ function canTransition(fromStatus, toStatus) {
 }
 
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+const withTimeout = (promise, ms) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms).unref()),
+  ]);
+
+app.get('/health', async (req, res) => {
+  try {
+    await withTimeout(prisma.$queryRaw`SELECT 1`, 2000);
+    res.json({ status: 'ok', database: 'up', uptimeSeconds: Math.round(process.uptime()) });
+  } catch (err) {
+    req.log.error(err);
+    res.status(503).json({ status: 'degraded', database: 'down' });
+  }
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -172,7 +212,7 @@ app.post('/api/auth/register', async (req, res) => {
     });
   
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -205,7 +245,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     res.json({ token });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -235,7 +275,7 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
     }
     res.json(profileView(user));
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -273,7 +313,7 @@ app.put('/api/auth/me', requireAuth, async (req, res) => {
 
     res.json(profileView(updatedUser));
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -306,7 +346,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     res.json({ message: 'If that email exists, a reset link has been sent.' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -339,7 +379,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
 
     res.json({ message: 'Email verified successfully' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -374,7 +414,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
 
     res.json({ message: 'If that account exists and is unverified, a new link has been sent.' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -407,7 +447,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 
     res.json({ message: 'Password has been reset successfully.' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -439,7 +479,7 @@ app.post('/api/seller/apply', requireAuth, async (req, res) => {
 
     res.status(201).json(application);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -455,7 +495,7 @@ app.get('/api/seller/application', requireAuth, async (req, res) => {
 
     res.json(application);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -468,7 +508,7 @@ app.get('/api/admin/seller-applications', requireAuth, requireAdmin, async (req,
     });
     res.json(applications);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -501,7 +541,7 @@ app.post('/api/admin/seller-applications/:id/approve', requireAuth, requireAdmin
 
     res.json({ message: 'Application approved', application });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -524,7 +564,7 @@ app.post('/api/admin/seller-applications/:id/reject', requireAuth, requireAdmin,
 
     res.json({ message: 'Application rejected', application });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -534,7 +574,7 @@ app.get('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
     const store = await prisma.store.findUnique({ where: { userId: req.userId } });
     res.json(store);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -550,7 +590,7 @@ app.put('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
 
     res.json(store);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -648,7 +688,7 @@ app.post('/api/products', requireAuth, requireSeller, async (req, res) => {
 
     res.status(201).json(product);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -661,7 +701,7 @@ app.get('/api/seller/products', requireAuth, requireSeller, async (req, res) => 
     });
     res.json(products);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -702,7 +742,7 @@ app.put('/api/products/:id', requireAuth, requireSeller, async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -728,7 +768,7 @@ app.post('/api/products/:id/deactivate', requireAuth, requireSeller, async (req,
 
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -761,7 +801,7 @@ app.get('/api/products/:id', async (req, res) => {
 
     res.json(product);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -881,7 +921,7 @@ app.get('/api/products', async (req, res) => {
       },
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -897,7 +937,7 @@ app.get('/api/sellers/:sellerId/products', async (req, res) => {
     });
     res.json(products);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -918,7 +958,7 @@ app.get('/api/sellers/:sellerId/rating', async (req, res) => {
 
     res.json({ averageRating, totalReviews: reviews.length });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -951,7 +991,7 @@ app.put('/api/reviews/:id/response', requireAuth, requireSeller, async (req, res
 
     res.json(updatedReview);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -968,7 +1008,7 @@ app.delete('/api/admin/reviews/:id', requireAuth, requireAdmin, async (req, res)
 
     res.json({ message: 'Review removed' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -989,7 +1029,7 @@ app.get('/api/cart', requireAuth, async (req, res) => {
 
     res.json(cart);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1030,7 +1070,7 @@ app.post('/api/cart/items', requireAuth, async (req, res) => {
 
     res.status(201).json(item);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1059,7 +1099,7 @@ app.put('/api/cart/items/:id', requireAuth, async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1079,7 +1119,7 @@ app.delete('/api/cart/items/:id', requireAuth, async (req, res) => {
 
     res.json({ message: 'Item removed' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1191,7 +1231,7 @@ app.post('/api/checkout/preview', requireAuth, async (req, res) => {
       canCheckout: summary.issues.length === 0 && !!address.text,
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1254,7 +1294,7 @@ app.post('/api/checkout', requireAuth, async (req, res) => {
 
     res.status(201).json({ message: 'Orders created', orders: createdOrders });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1269,7 +1309,7 @@ app.get('/api/orders', requireAuth, async (req, res) => {
     });
     res.json(orders);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1336,7 +1376,7 @@ app.post('/api/orders/:id/create-payment', requireAuth, async (req, res) => {
       keyId: process.env.RAZORPAY_KEY_ID,
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1350,7 +1390,7 @@ app.get('/api/seller/orders', requireAuth, requireSeller, async (req, res) => {
     });
     res.json(orders);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1367,7 +1407,7 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
     });
     res.json(orders);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1421,7 +1461,7 @@ app.post('/api/products/:id/reviews', requireAuth, async (req, res) => {
     if (err.code === 'P2002') {
       return res.status(409).json({ error: 'You have already reviewed this product for this order' });
     }
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1585,7 +1625,7 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
 
     res.json({ message: 'Payment confirmed', order: forBuyer(confirmedOrder) });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1629,7 +1669,7 @@ app.post('/api/orders/:id/request-refund', requireAuth, async (req, res) => {
 
     res.json({ message: 'Refund requested', order: updatedOrder });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1683,7 +1723,7 @@ app.post('/api/orders/:id/approve-refund', requireAuth, async (req, res) => {
 
     res.json({ message: 'Refund approved', order: updatedOrder });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1733,7 +1773,7 @@ app.post('/api/orders/:id/reject-refund', requireAuth, async (req, res) => {
 
     res.json({ message: 'Refund rejected', order: updatedOrder });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1802,7 +1842,7 @@ app.put('/api/orders/:id/status', requireAuth, async (req, res) => {
 
     res.json({ message: 'Order status updated', order: updatedOrder });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1860,7 +1900,7 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
     }
     res.json({ message: 'Order cancelled', order: updatedOrder });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1887,7 +1927,7 @@ app.get('/api/orders/:id/transactions', requireAuth, async (req, res) => {
 
     res.json(transactions);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1903,7 +1943,7 @@ app.get('/api/notifications', requireAuth, async (req, res) => {
     });
     res.json(notifications);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1915,7 +1955,7 @@ app.get('/api/notifications/unread-count', requireAuth, async (req, res) => {
     });
     res.json({ unread: count });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1928,7 +1968,7 @@ app.put('/api/notifications/read-all', requireAuth, async (req, res) => {
     });
     res.json({ message: 'All notifications marked as read' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1947,7 +1987,7 @@ app.put('/api/notifications/:id/read', requireAuth, async (req, res) => {
     });
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1967,7 +2007,7 @@ app.get('/api/notification-preferences', requireAuth, async (req, res) => {
 
     res.json(preferences);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -1996,7 +2036,7 @@ app.put('/api/notification-preferences', requireAuth, async (req, res) => {
 
     res.json(pref);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2060,7 +2100,7 @@ app.get('/api/seller/analytics/overview', requireAuth, requireSeller, analyticsC
       returnRequests: row.returned,
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2085,7 +2125,7 @@ app.get('/api/seller/analytics/revenue', requireAuth, requireSeller, analyticsCa
 
     res.json({ period: unit, days, data: rows });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2113,7 +2153,7 @@ app.get('/api/seller/analytics/top-products', requireAuth, requireSeller, analyt
 
     res.json({ sortedBy: sortBy, data: rows });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2164,7 +2204,7 @@ app.get('/api/admin/analytics/overview', requireAuth, requireAdmin, analyticsCac
       active: { days, buyers: active.buyers, sellers: active.sellers },
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2191,7 +2231,7 @@ app.get('/api/admin/analytics/top-sellers', requireAuth, requireAdmin, analytics
 
     res.json({ sortedBy: sortBy, data: rows });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2221,7 +2261,7 @@ app.get('/api/admin/analytics/top-categories', requireAuth, requireAdmin, analyt
 
     res.json({ sortedBy: sortBy, data: rows });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2245,7 +2285,7 @@ app.get('/api/admin/analytics/active-users', requireAuth, requireAdmin, analytic
 
     res.json({ period: unit, days, data: rows });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2268,7 +2308,7 @@ app.get('/api/categories', async (req, res) => {
 
     res.json({ categories: build(null) });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2298,7 +2338,7 @@ app.post('/api/admin/categories', requireAuth, requireAdmin, async (req, res) =>
     const category = await prisma.category.create({ data: { name, parentId } });
     res.status(201).json(category);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2367,7 +2407,7 @@ app.put('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, res)
     const updated = await prisma.category.update({ where: { id: category.id }, data });
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2390,7 +2430,7 @@ app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, r
     await prisma.category.delete({ where: { id: category.id } });
     res.json({ message: 'Category deleted' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2424,7 +2464,7 @@ app.get('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
 
     res.json({ products, pagination: { page: pageNum, limit: limitNum, total } });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2457,7 +2497,7 @@ app.post('/api/admin/products/:id/remove', requireAuth, requireAdmin, async (req
 
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2484,7 +2524,7 @@ app.post('/api/admin/products/:id/restore', requireAuth, requireAdmin, async (re
 
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2550,7 +2590,7 @@ app.get('/api/seller/dashboard', requireAuth, requireSeller, async (req, res) =>
       recentActivity,
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2583,7 +2623,7 @@ app.get('/api/seller/earnings/summary', requireAuth, requireSeller, async (req, 
       refunded: { orders: row.refundedOrders, sales: row.refundedSales },
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2622,7 +2662,7 @@ app.get('/api/seller/earnings/transactions', requireAuth, requireSeller, async (
       pagination: { page: pageNum, limit: limitNum, total: totals.count },
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2688,7 +2728,7 @@ app.get('/api/orders/:id', requireAuth, async (req, res) => {
       viewerRole,
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2744,7 +2784,7 @@ app.get('/api/addresses', requireAuth, async (req, res) => {
     });
     res.json(addresses);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2777,7 +2817,7 @@ app.post('/api/addresses', requireAuth, async (req, res) => {
 
     res.status(201).json(created);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2815,7 +2855,7 @@ app.put('/api/addresses/:id', requireAuth, async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2839,7 +2879,7 @@ app.delete('/api/addresses/:id', requireAuth, async (req, res) => {
 
     res.json({ message: 'Address deleted' });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2901,7 +2941,7 @@ app.get('/api/admin/payouts', requireAuth, requireAdmin, async (req, res) => {
       pagination: { page: pageNum, limit: limitNum, total },
     });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2951,7 +2991,7 @@ app.post('/api/admin/orders/:id/mark-payout-paid', requireAuth, requireAdmin, as
     const updated = await prisma.order.findUnique({ where: { id: order.id }, select: PAYOUT_SELECT });
     res.json(updated);
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -2992,7 +3032,7 @@ app.post('/api/admin/orders/expire-unpaid', requireAuth, requireAdmin, async (re
     const expired = await expireUnpaidOrders();
     res.json({ expired, ttlHours: UNPAID_ORDER_TTL_HOURS });
   } catch (err) {
-    console.error(err);
+    req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -3013,9 +3053,31 @@ app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
     return res.status(413).json({ error: 'Request body too large' });
   }
-  console.error(err);
+  req.log.error(err);
   res.status(500).json({ error: 'Something went wrong' });
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`API running on port ${PORT}`));
+const server = app.listen(PORT, () => logger.info(`API running on port ${PORT}`));
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ signal }, 'shutting down');
+  clearInterval(expiryTimer);
+
+  const forceExit = setTimeout(() => {
+    logger.error('forced exit after 10 seconds');
+    process.exit(1);
+  }, 10000);
+  forceExit.unref();
+
+  server.close(async () => {
+    await prisma.$disconnect();
+    process.exit(0);
+  });
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
