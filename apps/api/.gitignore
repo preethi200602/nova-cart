@@ -17,3 +17,5 @@ node_modules
 .devin/
 .windsurf/
 skills-lock.json
+
+.env.test

@@ -32,7 +32,7 @@ const logger = pino({
     paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
     censor: '[hidden]',
   },
-  ...(isProduction ? {} : { transport: { target: 'pino-pretty' } }),
+  ...(isProduction || process.env.NODE_ENV === 'test' ? {} : { transport: { target: 'pino-pretty' } }),
 });
 
 app.use(
@@ -3037,10 +3037,14 @@ app.post('/api/admin/orders/expire-unpaid', requireAuth, requireAdmin, async (re
   }
 });
 
-const expiryTimer = setInterval(() => {
-  expireUnpaidOrders().catch((err) => console.error('expireUnpaidOrders failed', err));
-}, EXPIRY_INTERVAL_MS);
-expiryTimer.unref();
+let expiryTimer = null;
+
+function startExpiryJob() {
+  expiryTimer = setInterval(() => {
+    expireUnpaidOrders().catch((err) => console.error('expireUnpaidOrders failed', err));
+  }, EXPIRY_INTERVAL_MS);
+  expiryTimer.unref();
+}
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -3057,27 +3061,34 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong' });
 });
 
-const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => logger.info(`API running on port ${PORT}`));
+// Only start listening and background jobs when run directly (node server.js).
+// Tests import the app without starting anything.
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
+  const server = app.listen(PORT, () => logger.info(`API running on port ${PORT}`));
+  startExpiryJob();
 
-let shuttingDown = false;
-async function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  logger.info({ signal }, 'shutting down');
-  clearInterval(expiryTimer);
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, 'shutting down');
+    if (expiryTimer) clearInterval(expiryTimer);
 
-  const forceExit = setTimeout(() => {
-    logger.error('forced exit after 10 seconds');
-    process.exit(1);
-  }, 10000);
-  forceExit.unref();
+    const forceExit = setTimeout(() => {
+      logger.error('forced exit after 10 seconds');
+      process.exit(1);
+    }, 10000);
+    forceExit.unref();
 
-  server.close(async () => {
-    await prisma.$disconnect();
-    process.exit(0);
-  });
+    server.close(async () => {
+      await prisma.$disconnect();
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+module.exports = { app, prisma, expireUnpaidOrders };
