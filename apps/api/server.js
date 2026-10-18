@@ -17,7 +17,50 @@ const razorpay = new Razorpay({
 });
 
 const app = express();
-app.use(express.json());
+const helmet = require('helmet');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+
+app.disable('x-powered-by');
+app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
+
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(
+  cors({
+    origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin)),
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: '100kb' }));
+
+const limiterMessage = { error: 'Too many requests, please try again later' };
+const makeLimiter = (options) =>
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: limiterMessage,
+    ...options,
+  });
+
+app.use('/api', makeLimiter({ limit: Number(process.env.GENERAL_RATE_LIMIT) || 1000 }));
+app.use('/api/auth/login', makeLimiter({ limit: 10, skipSuccessfulRequests: true }));
+app.use(
+  [
+    '/api/auth/register',
+    '/api/auth/forgot-password',
+    '/api/auth/reset-password',
+    '/api/auth/resend-verification',
+    '/api/auth/verify-email',
+  ],
+  makeLimiter({ limit: 10 })
+);
+app.use(['/api/orders/:id/create-payment', '/api/orders/:id/confirm-payment'], makeLimiter({ limit: 30 }));
 
 const prisma = new PrismaClient();
 
@@ -86,7 +129,6 @@ function canTransition(fromStatus, toStatus) {
   return ORDER_TRANSITIONS[fromStatus]?.includes(toStatus) || false;
 }
 
-app.use(require('cors')());
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
@@ -2959,6 +3001,21 @@ const expiryTimer = setInterval(() => {
   expireUnpaidOrders().catch((err) => console.error('expireUnpaidOrders failed', err));
 }, EXPIRY_INTERVAL_MS);
 expiryTimer.unref();
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON in request body' });
+  }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body too large' });
+  }
+  console.error(err);
+  res.status(500).json({ error: 'Something went wrong' });
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`API running on port ${PORT}`));
