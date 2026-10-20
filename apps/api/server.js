@@ -1,5 +1,5 @@
 const express = require('express');
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -77,7 +77,7 @@ const makeLimiter = (options) =>
   });
 
 app.use('/api', makeLimiter({ limit: Number(process.env.GENERAL_RATE_LIMIT) || 1000 }));
-app.use('/api/auth/login', makeLimiter({ limit: 10, skipSuccessfulRequests: true }));
+app.use('/api/auth/login', makeLimiter({ limit: Number(process.env.LOGIN_RATE_LIMIT) || 10, skipSuccessfulRequests: true }));
 app.use(
   [
     '/api/auth/register',
@@ -86,9 +86,9 @@ app.use(
     '/api/auth/resend-verification',
     '/api/auth/verify-email',
   ],
-  makeLimiter({ limit: 10 })
+  makeLimiter({ limit: Number(process.env.ACCOUNT_RATE_LIMIT) || 10 })
 );
-app.use(['/api/orders/:id/create-payment', '/api/orders/:id/confirm-payment'], makeLimiter({ limit: 30 }));
+app.use(['/api/orders/:id/create-payment', '/api/orders/:id/confirm-payment'], makeLimiter({ limit: Number(process.env.PAYMENT_RATE_LIMIT) || 30 }));
 
 const prisma = new PrismaClient();
 

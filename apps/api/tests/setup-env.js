@@ -9,3 +9,6 @@ if (!url.includes('nova_cart_test')) {
 }
 
 process.env.NODE_ENV = 'test';
+
+// Keep test output readable: notify.js logs an email preview link.
+console.log = () => {};
