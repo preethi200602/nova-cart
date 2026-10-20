@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nova_cart_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nova_cart_test
+      JWT_SECRET: ci-only-secret-0123456789abcdef0123456789abcdef
+      RAZORPAY_KEY_ID: rzp_test_dummy
+      RAZORPAY_KEY_SECRET: dummy_secret_for_tests_only
+      PLATFORM_FEE_PERCENT: "10"
+      NODE_ENV: test
+      LOG_LEVEL: silent
+      LOGIN_RATE_LIMIT: "1000"
+      ACCOUNT_RATE_LIMIT: "1000"
+      PAYMENT_RATE_LIMIT: "1000"
+      GENERAL_RATE_LIMIT: "100000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter "api..."
+
+      - name: Generate the Prisma client
+        run: pnpm --filter api exec prisma generate
+
+      - name: Apply the database migrations
+        run: pnpm --filter api exec prisma migrate deploy
+
+      - name: Run the tests
+        run: pnpm --filter api test
