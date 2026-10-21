@@ -10,6 +10,8 @@ const requireSeller = require('./middleware/requireSeller');
 const { Prisma } = require('@prisma/client');
 const Razorpay = require('razorpay');
 const { notify } = require('./notify');
+const { validate } = require('./validate');
+const schemas = require('./schemas');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -174,7 +176,7 @@ app.get('/health', async (req, res) => {
   }
 });
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', validate(schemas.registerSchema), async (req, res) => {
   try {
     const { email, password, name } = req.body;
 
@@ -217,7 +219,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', validate(schemas.loginSchema), async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -318,7 +320,7 @@ app.put('/api/auth/me', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/auth/forgot-password', async (req, res) => {
+app.post('/api/auth/forgot-password', validate(schemas.forgotPasswordSchema), async (req, res) => {
   try {
     const { email } = req.body;
     const user = await prisma.user.findUnique({ where: { email } });
@@ -351,7 +353,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 });
 
-app.post('/api/auth/verify-email', async (req, res) => {
+app.post('/api/auth/verify-email', validate(schemas.verifyEmailSchema), async (req, res) => {
   try {
     const { token } = req.body;
 
@@ -384,7 +386,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
   }
 });
 
-app.post('/api/auth/resend-verification', async (req, res) => {
+app.post('/api/auth/resend-verification', validate(schemas.resendVerificationSchema), async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -419,7 +421,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
   }
 });
 
-app.post('/api/auth/reset-password', async (req, res) => {
+app.post('/api/auth/reset-password', validate(schemas.resetPasswordSchema), async (req, res) => {
   try {
     const { token, newPassword } = req.body;
 
@@ -451,7 +453,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
-app.post('/api/seller/apply', requireAuth, async (req, res) => {
+app.post('/api/seller/apply', requireAuth, validate(schemas.sellerApplySchema), async (req, res) => {
   try {
     const { businessName, description, categoryFocus, contactDetails } = req.body;
 
@@ -579,7 +581,7 @@ app.get('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
   }
 });
 
-app.put('/api/seller/store', requireAuth, requireSeller, async (req, res) => {
+app.put('/api/seller/store', requireAuth, requireSeller, validate(schemas.storeUpdateSchema), async (req, res) => {
   try {
     const { storeName, banner, description, policies } = req.body;
 
