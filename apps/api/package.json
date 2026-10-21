@@ -25,7 +25,8 @@
     "pg": "^8.23.0",
     "pino": "^10.4.0",
     "pino-http": "^11.0.0",
-    "razorpay": "^2.9.8"
+    "razorpay": "^2.9.8",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "jest": "^30.5.2",
