@@ -965,7 +965,7 @@ app.get('/api/sellers/:sellerId/rating', async (req, res) => {
   }
 });
 
-app.put('/api/reviews/:id/response', requireAuth, requireSeller, async (req, res) => {
+app.put('/api/reviews/:id/response', requireAuth, requireSeller, validate(schemas.sellerResponseSchema), async (req, res) => {
   try {
     const { sellerResponse } = req.body;
 
@@ -1036,7 +1036,7 @@ app.get('/api/cart', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/cart/items', requireAuth, async (req, res) => {
+app.post('/api/cart/items', requireAuth, validate(schemas.addCartItemSchema), async (req, res) => {
   try {
     const { productId, quantity } = req.body;
 
@@ -1077,7 +1077,7 @@ app.post('/api/cart/items', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/cart/items/:id', requireAuth, async (req, res) => {
+app.put('/api/cart/items/:id', requireAuth, validate(schemas.updateCartItemSchema), async (req, res) => {
   try {
     const { quantity } = req.body;
 
@@ -1414,7 +1414,7 @@ app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/products/:id/reviews', requireAuth, async (req, res) => {
+app.post('/api/products/:id/reviews', requireAuth, validate(schemas.reviewSchema), async (req, res) => {
   try {
     const { orderId, rating, comment } = req.body;
     const productId = req.params.id;
@@ -1632,7 +1632,7 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/orders/:id/request-refund', requireAuth, async (req, res) => {
+app.post('/api/orders/:id/request-refund', requireAuth, validate(schemas.requestRefundSchema), async (req, res) => {
   try {
     const { reason } = req.body;
 
@@ -1730,7 +1730,7 @@ app.post('/api/orders/:id/approve-refund', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/orders/:id/reject-refund', requireAuth, async (req, res) => {
+app.post('/api/orders/:id/reject-refund', requireAuth, validate(schemas.rejectRefundSchema), async (req, res) => {
   try {
     const { reason } = req.body;
 
@@ -1780,7 +1780,7 @@ app.post('/api/orders/:id/reject-refund', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/orders/:id/status', requireAuth, async (req, res) => {
+app.put('/api/orders/:id/status', requireAuth, validate(schemas.orderStatusSchema), async (req, res) => {
   try {
     const { status, trackingInfo } = req.body;
 

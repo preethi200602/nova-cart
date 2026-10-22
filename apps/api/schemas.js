@@ -61,6 +61,52 @@ const storeUpdateSchema = z.object({
   policies: z.string({ error: 'Policies must be text' }).trim().max(2000, { error: 'Policies must be at most 2000 characters' }).optional(),
 });
 
+// ---- Batch (b): cart, reviews, refunds, order status ----
+const quantity = z
+  .number({ error: 'Quantity is required and must be a number' })
+  .int({ error: 'Quantity must be a whole number' })
+  .min(1, { error: 'Quantity must be at least 1' })
+  .max(1000, { error: 'Quantity must be at most 1000' });
+
+// Optional note: text up to max characters; null or missing is allowed.
+const optionalNote = (label, max) =>
+  z
+    .string({ error: `${label} must be text` })
+    .trim()
+    .max(max, { error: `${label} must be at most ${max} characters` })
+    .nullable()
+    .optional();
+
+const addCartItemSchema = z.object({
+  productId: text('Product id', 100),
+  quantity,
+});
+
+const updateCartItemSchema = z.object({ quantity });
+
+const reviewSchema = z.object({
+  orderId: text('Order id', 100),
+  rating: z
+    .number({ error: 'Rating is required and must be a number' })
+    .int({ error: 'Rating must be a whole number' })
+    .min(1, { error: 'Rating must be between 1 and 5' })
+    .max(5, { error: 'Rating must be between 1 and 5' }),
+  comment: optionalNote('Comment', 2000),
+});
+
+const sellerResponseSchema = z.object({
+  sellerResponse: text('Seller response', 2000),
+});
+
+const requestRefundSchema = z.object({ reason: optionalNote('Reason', 1000) });
+const rejectRefundSchema = z.object({ reason: text('Reason', 1000) });
+
+// Shape only. Which statuses are allowed, and who may set them, is still decided in the route.
+const orderStatusSchema = z.object({
+  status: text('Status', 50),
+  trackingInfo: optionalNote('Tracking info', 500),
+});
+
 module.exports = {
   registerSchema,
   loginSchema,
@@ -70,4 +116,11 @@ module.exports = {
   resetPasswordSchema,
   sellerApplySchema,
   storeUpdateSchema,
+  addCartItemSchema,
+  updateCartItemSchema,
+  reviewSchema,
+  sellerResponseSchema,
+  requestRefundSchema,
+  rejectRefundSchema,
+  orderStatusSchema,
 };
