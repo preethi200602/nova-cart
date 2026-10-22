@@ -107,6 +107,15 @@ const orderStatusSchema = z.object({
   trackingInfo: optionalNote('Tracking info', 500),
 });
 
+// ---- Batch (c): notification preferences ----
+// Shape only. Whether the category exists, and the "security emails cannot be turned off" rule,
+// are still decided in the route.
+const notificationPreferenceSchema = z.object({
+  category: text('Category', 50),
+  email: z.boolean({ error: 'Email must be true or false' }).optional(),
+  inApp: z.boolean({ error: 'inApp must be true or false' }).optional(),
+});
+
 module.exports = {
   registerSchema,
   loginSchema,
@@ -123,4 +132,5 @@ module.exports = {
   requestRefundSchema,
   rejectRefundSchema,
   orderStatusSchema,
+  notificationPreferenceSchema,
 };

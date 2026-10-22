@@ -2014,7 +2014,7 @@ app.get('/api/notification-preferences', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/notification-preferences', requireAuth, async (req, res) => {
+app.put('/api/notification-preferences', requireAuth, validate(schemas.notificationPreferenceSchema), async (req, res) => {
   try {
     const { category, email, inApp } = req.body;
 
