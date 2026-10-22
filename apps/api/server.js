@@ -1306,7 +1306,15 @@ app.get('/api/orders', requireAuth, async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
       where: { buyerId: req.userId },
-      omit: { platformFee: true, payoutAmount: true },
+      omit: {
+        platformFee: true,
+        payoutAmount: true,
+        payoutStatus: true,
+        payoutPaidAt: true,
+        payoutReference: true,
+        razorpayOrderId: true,
+        razorpayPaymentId: true,
+      },
       include: { items: { include: { product: { select: { name: true, images: true } } } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -1670,7 +1678,7 @@ app.post('/api/orders/:id/request-refund', requireAuth, validate(schemas.request
       `A buyer requested a refund on order ${order.id.slice(0, 8)}.${reason ? ' Reason: ' + reason : ''} Please review it.`
     );
 
-    res.json({ message: 'Refund requested', order: updatedOrder });
+    res.json({ message: 'Refund requested', order: forBuyer(updatedOrder) });
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -1901,7 +1909,10 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
         ],
       });
     }
-    res.json({ message: 'Order cancelled', order: updatedOrder });
+    res.json({
+      message: 'Order cancelled',
+      order: isOwningBuyer && !isOwningSeller ? forBuyer(updatedOrder) : updatedOrder,
+    });
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
