@@ -12,6 +12,7 @@ const Razorpay = require('razorpay');
 const { notify } = require('./notify');
 const { validate } = require('./validate');
 const schemas = require('./schemas');
+const { hashToken, appUrl } = require('./tokens');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -195,14 +196,14 @@ app.post('/api/auth/register', validate(schemas.registerSchema), async (req, res
     const verificationTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     const user = await prisma.user.create({
-      data: { email, password: hashedPassword, name, verificationToken, verificationTokenExpiry },
+      data: { email, password: hashedPassword, name, verificationToken: hashToken(verificationToken), verificationTokenExpiry },
     });
 
     notify(
       user.id,
       'security',
       'Verify your email address',
-      `Welcome to Nova-Cart! Please verify your email to activate your account (link valid for 24 hours): http://localhost:3000/verify-email?token=${verificationToken}`,
+      `Welcome to Nova-Cart! Please verify your email to activate your account (link valid for 24 hours): ${appUrl()}/verify-email?token=${verificationToken}`,
       { emailOnly: true }
     );
 
@@ -334,7 +335,7 @@ app.post('/api/auth/forgot-password', validate(schemas.forgotPasswordSchema), as
 
     await prisma.user.update({
       where: { email },
-      data: { resetToken, resetTokenExpiry },
+      data: { resetToken: hashToken(resetToken), resetTokenExpiry },
     });
 
 
@@ -342,7 +343,7 @@ app.post('/api/auth/forgot-password', validate(schemas.forgotPasswordSchema), as
       user.id,
       'security',
       'Password reset requested',
-      `Use this link to reset your password (valid for 15 minutes): http://localhost:3000/reset-password?token=${resetToken}`,
+      `Use this link to reset your password (valid for 15 minutes): ${appUrl()}/reset-password?token=${resetToken}`,
       { emailOnly: true }
     );
 
@@ -363,7 +364,7 @@ app.post('/api/auth/verify-email', validate(schemas.verifyEmailSchema), async (r
 
     const user = await prisma.user.findFirst({
       where: {
-        verificationToken: token,
+        verificationToken: hashToken(token),
         verificationTokenExpiry: { gt: new Date() },
       },
     });
@@ -402,14 +403,14 @@ app.post('/api/auth/resend-verification', validate(schemas.resendVerificationSch
 
       await prisma.user.update({
         where: { id: user.id },
-        data: { verificationToken, verificationTokenExpiry },
+        data: { verificationToken: hashToken(verificationToken), verificationTokenExpiry },
       });
 
       notify(
         user.id,
         'security',
         'Verify your email address',
-        `Here is your new verification link (valid for 24 hours): http://localhost:3000/verify-email?token=${verificationToken}`,
+        `Here is your new verification link (valid for 24 hours): ${appUrl()}/verify-email?token=${verificationToken}`,
         { emailOnly: true }
       );
     }
@@ -427,7 +428,7 @@ app.post('/api/auth/reset-password', validate(schemas.resetPasswordSchema), asyn
 
     const user = await prisma.user.findFirst({
       where: {
-        resetToken: token,
+        resetToken: hashToken(token),
         resetTokenExpiry: { gt: new Date() },
       },
     });
