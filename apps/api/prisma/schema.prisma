@@ -36,6 +36,7 @@ model User {
   notificationPreferences NotificationPreference[]
     verificationToken       String?
   verificationTokenExpiry DateTime?
+  refreshTokens           RefreshToken[]
 }
 
 model SellerApplication {
@@ -211,6 +212,18 @@ model Address {
   isDefault  Boolean  @default(false)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
 
   @@index([userId])
 }
