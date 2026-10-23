@@ -13,6 +13,7 @@ const { notify } = require('./notify');
 const { validate } = require('./validate');
 const schemas = require('./schemas');
 const { hashToken, appUrl } = require('./tokens');
+const { signAccessToken, issueRefreshToken, rotateRefreshToken, revokeAllRefreshTokens } = require('./sessions');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -81,6 +82,7 @@ const makeLimiter = (options) =>
 
 app.use('/api', makeLimiter({ limit: Number(process.env.GENERAL_RATE_LIMIT) || 1000 }));
 app.use('/api/auth/login', makeLimiter({ limit: Number(process.env.LOGIN_RATE_LIMIT) || 10, skipSuccessfulRequests: true }));
+app.use('/api/auth/refresh', makeLimiter({ limit: Number(process.env.REFRESH_RATE_LIMIT) || 30 }));
 app.use(
   [
     '/api/auth/register',
@@ -244,9 +246,42 @@ app.post('/api/auth/login', validate(schemas.loginSchema), async (req, res) => {
       });
     }
 
-    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const token = signAccessToken(user);
+    const refreshToken = await issueRefreshToken(prisma, user.id);
 
-    res.json({ token });
+    res.json({ token, refreshToken });
+  } catch (err) {
+    req.log.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/auth/refresh', validate(schemas.refreshSchema), async (req, res) => {
+  try {
+    const result = await rotateRefreshToken(prisma, req.body.refreshToken);
+    if (result.error) {
+      return res.status(401).json({ error: result.error });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: result.userId } });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    res.json({ token: signAccessToken(user), refreshToken: result.token });
+  } catch (err) {
+    req.log.error(err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+app.post('/api/auth/logout', validate(schemas.refreshSchema), async (req, res) => {
+  try {
+    await prisma.refreshToken.updateMany({
+      where: { tokenHash: hashToken(req.body.refreshToken), revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    res.json({ message: 'Logged out' });
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -447,6 +482,8 @@ app.post('/api/auth/reset-password', validate(schemas.resetPasswordSchema), asyn
         resetTokenExpiry: null,
       },
     });
+
+    await revokeAllRefreshTokens(prisma, user.id);
 
     res.json({ message: 'Password has been reset successfully.' });
   } catch (err) {

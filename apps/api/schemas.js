@@ -116,6 +116,9 @@ const notificationPreferenceSchema = z.object({
   inApp: z.boolean({ error: 'inApp must be true or false' }).optional(),
 });
 
+// ---- Sessions: refresh tokens ----
+const refreshSchema = z.object({ refreshToken: text('Refresh token', 300) });
+
 module.exports = {
   registerSchema,
   loginSchema,
@@ -133,4 +136,5 @@ module.exports = {
   rejectRefundSchema,
   orderStatusSchema,
   notificationPreferenceSchema,
+  refreshSchema,
 };
