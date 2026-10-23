@@ -1087,6 +1087,10 @@ app.post('/api/cart/items', requireAuth, validate(schemas.addCartItemSchema), as
       return res.status(400).json({ error: 'Product not available' });
     }
 
+    if (product.sellerId === req.userId) {
+      return res.status(400).json({ error: 'You cannot buy your own products' });
+    }
+
     let cart = await prisma.cart.findUnique({ where: { buyerId: req.userId } });
     if (!cart) {
       cart = await prisma.cart.create({ data: { buyerId: req.userId } });
@@ -1260,6 +1264,9 @@ app.post('/api/checkout/preview', requireAuth, async (req, res) => {
 
     const summary = buildCartSummary(cart.items);
     const address = await resolveDeliveryAddress(req.userId, req.body || {});
+    const ownProducts = cart.items
+      .filter((item) => item.product?.sellerId === req.userId)
+      .map((item) => ({ productId: item.productId, name: item.product.name }));
 
     res.json({
       sellers: summary.sellers,
@@ -1268,7 +1275,8 @@ app.post('/api/checkout/preview', requireAuth, async (req, res) => {
       deliveryAddress: address.text || null,
       addressProblem: address.error || null,
       issues: summary.issues,
-      canCheckout: summary.issues.length === 0 && !!address.text,
+      ownProducts,
+      canCheckout: summary.issues.length === 0 && ownProducts.length === 0 && !!address.text,
     });
   } catch (err) {
     req.log.error(err);
@@ -1290,6 +1298,12 @@ app.post('/api/checkout', requireAuth, async (req, res) => {
 
     if (!cart || cart.items.length === 0) {
       return res.status(400).json({ error: 'Cart is empty' });
+    }
+
+    if (cart.items.some((item) => item.product?.sellerId === req.userId)) {
+      return res
+        .status(400)
+        .json({ error: 'You cannot buy your own products. Remove them from your cart to continue.' });
     }
 
     const summary = buildCartSummary(cart.items);
