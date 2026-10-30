@@ -83,8 +83,8 @@ describe('buyer-facing order responses hide seller-side fields', () => {
     await paidOrder();
     const res = await request(app).get('/api/orders').set(asUser(buyer));
     expect(res.status).toBe(200);
-    expect(res.body.length).toBeGreaterThan(0);
-    for (const order of res.body) {
+    expect(res.body.orders.length).toBeGreaterThan(0);
+    for (const order of res.body.orders) {
       expect(leaked(order)).toEqual([]);
     }
   });

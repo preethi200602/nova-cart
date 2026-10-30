@@ -1353,23 +1353,37 @@ app.post('/api/checkout', requireAuth, async (req, res) => {
   }
 });
 
+// Reads ?page and ?limit. Same rules as the product lists: page starts at 1, limit is capped at 100.
+function parsePaging(query, defaultLimit = 20) {
+  const page = Math.max(parseInt(query.page) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(query.limit) || defaultLimit, 1), 100);
+  return { page, limit, skip: (page - 1) * limit };
+}
+
 app.get('/api/orders', requireAuth, async (req, res) => {
   try {
-    const orders = await prisma.order.findMany({
-      where: { buyerId: req.userId },
-      omit: {
-        platformFee: true,
-        payoutAmount: true,
-        payoutStatus: true,
-        payoutPaidAt: true,
-        payoutReference: true,
-        razorpayOrderId: true,
-        razorpayPaymentId: true,
-      },
-      include: { items: { include: { product: { select: { name: true, images: true } } } } },
-      orderBy: { createdAt: 'desc' },
-    });
-    res.json(orders);
+    const { page, limit, skip } = parsePaging(req.query);
+    const where = { buyerId: req.userId };
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        omit: {
+          platformFee: true,
+          payoutAmount: true,
+          payoutStatus: true,
+          payoutPaidAt: true,
+          payoutReference: true,
+          razorpayOrderId: true,
+          razorpayPaymentId: true,
+        },
+        include: { items: { include: { product: { select: { name: true, images: true } } } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        skip,
+        take: limit,
+      }),
+      prisma.order.count({ where }),
+    ]);
+    res.json({ orders, pagination: { page, limit, total } });
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -1445,12 +1459,19 @@ app.post('/api/orders/:id/create-payment', requireAuth, async (req, res) => {
 
 app.get('/api/seller/orders', requireAuth, requireSeller, async (req, res) => {
   try {
-    const orders = await prisma.order.findMany({
-      where: { sellerId: req.userId },
-      include: { items: { include: { product: { select: { name: true, images: true } } } } },
-      orderBy: { createdAt: 'desc' },
-    });
-    res.json(orders);
+    const { page, limit, skip } = parsePaging(req.query);
+    const where = { sellerId: req.userId };
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        include: { items: { include: { product: { select: { name: true, images: true } } } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        skip,
+        take: limit,
+      }),
+      prisma.order.count({ where }),
+    ]);
+    res.json({ orders, pagination: { page, limit, total } });
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -1459,15 +1480,21 @@ app.get('/api/seller/orders', requireAuth, requireSeller, async (req, res) => {
 
 app.get('/api/admin/orders', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const orders = await prisma.order.findMany({
-      include: {
-        buyer: { select: { id: true, name: true, email: true } },
-        seller: { select: { id: true, name: true, email: true } },
-        items: { include: { product: { select: { name: true } } } },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    res.json(orders);
+    const { page, limit, skip } = parsePaging(req.query);
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        include: {
+          buyer: { select: { id: true, name: true, email: true } },
+          seller: { select: { id: true, name: true, email: true } },
+          items: { include: { product: { select: { name: true } } } },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        skip,
+        take: limit,
+      }),
+      prisma.order.count(),
+    ]);
+    res.json({ orders, pagination: { page, limit, total } });
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
@@ -2001,10 +2028,12 @@ const NOTIFICATION_CATEGORIES = ['account', 'orders', 'refunds', 'seller', 'revi
 
 app.get('/api/notifications', requireAuth, async (req, res) => {
   try {
+    const { skip, limit } = parsePaging(req.query, 50);
     const notifications = await prisma.notification.findMany({
       where: { userId: req.userId },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+      skip,
+      take: limit,
     });
     res.json(notifications);
   } catch (err) {

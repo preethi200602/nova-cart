@@ -183,8 +183,8 @@ describe('who sees what on an order', () => {
     expect(adminLedger.body.map((t) => t.type)).toEqual(['payment', 'platform_fee', 'payout']);
 
     const list = await request(app).get('/api/orders').set(asUser(buyer));
-    expect('platformFee' in list.body[0]).toBe(false);
-    expect('payoutAmount' in list.body[0]).toBe(false);
+    expect('platformFee' in list.body.orders[0]).toBe(false);
+    expect('payoutAmount' in list.body.orders[0]).toBe(false);
   });
 });
 
