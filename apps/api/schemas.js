@@ -107,6 +107,11 @@ const orderStatusSchema = z.object({
   trackingInfo: optionalNote('Tracking info', 500),
 });
 
+// Rejecting a seller application needs a reason the applicant will read (shape only).
+const rejectApplicationSchema = z.object({
+  rejectionReason: text('Rejection reason', 500).min(5, { error: 'Rejection reason must be at least 5 characters' }),
+});
+
 // ---- Batch (c): notification preferences ----
 // Shape only. Whether the category exists, and the "security emails cannot be turned off" rule,
 // are still decided in the route.
@@ -135,6 +140,7 @@ module.exports = {
   requestRefundSchema,
   rejectRefundSchema,
   orderStatusSchema,
+  rejectApplicationSchema,
   notificationPreferenceSchema,
   refreshSchema,
 };

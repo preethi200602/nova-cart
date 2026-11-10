@@ -555,51 +555,64 @@ app.get('/api/admin/seller-applications', requireAuth, requireAdmin, async (req,
 
 app.post('/api/admin/seller-applications/:id/approve', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const application = await prisma.sellerApplication.update({
-      where: { id: req.params.id },
-      data: { status: 'approved' },
+    // One transaction: the application, the seller flag and the store change together or not at all.
+    // The claim (status must still be "pending") makes a double click, or two admins at once, safe.
+    const approved = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.sellerApplication.updateMany({
+        where: { id: req.params.id, status: 'pending' },
+        data: { status: 'approved' },
+      });
+      if (claimed.count === 0) return null;
+
+      const application = await tx.sellerApplication.findUnique({ where: { id: req.params.id } });
+      await tx.user.update({ where: { id: application.userId }, data: { isSeller: true } });
+      await tx.store.create({
+        data: { userId: application.userId, storeName: application.businessName },
+      });
+      return application;
     });
 
-    await prisma.user.update({
-      where: { id: application.userId },
-      data: { isSeller: true },
-    });
+    if (!approved) {
+      const current = await prisma.sellerApplication.findUnique({ where: { id: req.params.id } });
+      if (!current) return res.status(404).json({ error: 'Application not found' });
+      return res.status(409).json({ error: `Application is already ${current.status}` });
+    }
 
-    await prisma.store.create({
-      data: {
-        userId: application.userId,
-        storeName: application.businessName,
-      },
-    });
-
-        await notify(
-      application.userId,
+    await notify(
+      approved.userId,
       'seller',
       'Your seller application was approved',
       'Congratulations! Your store is set up. You can now list products from your seller dashboard.'
     );
 
-    res.json({ message: 'Application approved', application });
+    res.json({ message: 'Application approved', application: approved });
   } catch (err) {
     req.log.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   }
 });
 
-app.post('/api/admin/seller-applications/:id/reject', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/admin/seller-applications/:id/reject', requireAuth, requireAdmin, validate(schemas.rejectApplicationSchema), async (req, res) => {
   try {
-    const { rejectionReason } = req.body;
+    const rejectionReason = req.body.rejectionReason.trim();
 
-    const application = await prisma.sellerApplication.update({
-      where: { id: req.params.id },
+    // Only a "pending" application can be rejected; the check and the change are one step.
+    const claimed = await prisma.sellerApplication.updateMany({
+      where: { id: req.params.id, status: 'pending' },
       data: { status: 'rejected', rejectionReason },
     });
 
-        await notify(
+    const application = await prisma.sellerApplication.findUnique({ where: { id: req.params.id } });
+    if (!application) return res.status(404).json({ error: 'Application not found' });
+    if (claimed.count === 0) {
+      return res.status(409).json({ error: `Application is already ${application.status}` });
+    }
+
+    await notify(
       application.userId,
       'seller',
       'Your seller application was not approved',
-      `Unfortunately your application was rejected.${rejectionReason ? ' Reason: ' + rejectionReason : ''}`
+      `Unfortunately your application was rejected. Reason: ${rejectionReason}`
     );
 
     res.json({ message: 'Application rejected', application });
@@ -1906,10 +1919,16 @@ app.put('/api/orders/:id/status', requireAuth, validate(schemas.orderStatusSchem
       data.deliveredAt = new Date();
     }
 
-    const updatedOrder = await prisma.order.update({
-      where: { id: order.id },
+    // Compare-and-set: change the order only if it is still in the status we just checked.
+    // If someone else (a cancel, a second click) got there first, nothing is written.
+    const claimed = await prisma.order.updateMany({
+      where: { id: order.id, status: order.status },
       data,
     });
+    if (claimed.count === 0) {
+      return res.status(409).json({ error: 'The order changed while you were updating it. Reload and try again.' });
+    }
+    const updatedOrder = await prisma.order.findUnique({ where: { id: order.id } });
 
         if (status === 'shipped') {
       await notify(
