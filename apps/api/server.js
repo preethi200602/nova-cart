@@ -1895,7 +1895,11 @@ app.put('/api/orders/:id/status', requireAuth, validate(schemas.orderStatusSchem
     const isAdmin = user.isAdmin;
 
     if (!isOwningSeller && !isAdmin) {
-      return res.status(403).json({ error: 'Not authorized to update this order' });
+      // The buyer owns the order, so they know it exists: 403 (wrong role). Anyone else is told it does not exist.
+      if (order.buyerId === req.userId) {
+        return res.status(403).json({ error: 'Not authorized to update this order' });
+      }
+      return res.status(404).json({ error: 'Order not found' });
     }
 
         const SETTABLE_HERE = ['processing', 'shipped', 'delivered'];
@@ -1962,15 +1966,12 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
       include: { items: true },
     });
 
-    if (!order) {
+    const isOwningBuyer = !!order && order.buyerId === req.userId;
+    const isOwningSeller = !!order && order.sellerId === req.userId;
+
+    // Someone who is not part of the order is told it does not exist (same as the order detail route).
+    if (!order || (!isOwningBuyer && !isOwningSeller)) {
       return res.status(404).json({ error: 'Order not found' });
-    }
-
-    const isOwningBuyer = order.buyerId === req.userId;
-    const isOwningSeller = order.sellerId === req.userId;
-
-    if (!isOwningBuyer && !isOwningSeller) {
-      return res.status(403).json({ error: 'Not authorized to cancel this order' });
     }
 
     if (!canTransition(order.status, 'cancelled')) {
@@ -1979,33 +1980,52 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req, res) => {
       });
     }
 
-    if (order.status !== 'payment_pending') {
-      for (const item of order.items) {
-        await prisma.product.update({
-          where: { id: item.productId },
-          data: { stock: { increment: item.quantity } },
+    const wasPaid = order.status !== 'payment_pending';
+
+    // One transaction: the status change, the stock going back and the ledger rows happen together or not at all.
+    // The claim (the order must still be in the status we just checked) lets only ONE of two simultaneous
+    // cancels, or a cancel racing a shipment, win. The loser changes nothing.
+    const cancelled = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.order.updateMany({
+        where: { id: order.id, status: order.status },
+        data: { status: 'cancelled' },
+      });
+      if (claimed.count === 0) return false;
+
+      if (wasPaid) {
+        for (const item of order.items) {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stock: { increment: item.quantity } },
+          });
+        }
+        await tx.transaction.createMany({
+          data: [
+            { orderId: order.id, type: 'refund', amount: -order.subtotal },
+            { orderId: order.id, type: 'platform_fee', amount: 0 - (order.platformFee || 0) },
+            { orderId: order.id, type: 'payout', amount: 0 - (order.payoutAmount || 0) },
+          ],
         });
+      }
+      return true;
+    });
+
+    if (!cancelled) {
+      return res.status(409).json({ error: 'The order changed while you were cancelling it. Reload and try again.' });
+    }
+
+    // After the commit: products that had sold out become active again (outside the transaction on purpose).
+    if (wasPaid) {
+      for (const item of order.items) {
         await syncStockState(item.productId, { notifySeller: false });
       }
     }
 
-    const updatedOrder = await prisma.order.update({
-      where: { id: order.id },
-      data: { status: 'cancelled' },
-    });
+    const updatedOrder = await prisma.order.findUnique({ where: { id: order.id } });
 
     await notify(order.buyerId, 'orders', 'Order cancelled', `Order ${order.id.slice(0, 8)} has been cancelled.`);
     await notify(order.sellerId, 'orders', 'Order cancelled', `Order ${order.id.slice(0, 8)} for your store has been cancelled.`);
 
-    if (order.status !== 'payment_pending') {
-      await prisma.transaction.createMany({
-        data: [
-          { orderId: order.id, type: 'refund', amount: -order.subtotal },
-          { orderId: order.id, type: 'platform_fee', amount: 0 - (order.platformFee || 0) },
-          { orderId: order.id, type: 'payout', amount: 0 - (order.payoutAmount || 0) },
-        ],
-      });
-    }
     res.json({
       message: 'Order cancelled',
       order: isOwningBuyer && !isOwningSeller ? forBuyer(updatedOrder) : updatedOrder,

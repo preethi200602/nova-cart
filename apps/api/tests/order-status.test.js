@@ -69,13 +69,18 @@ describe('who may change the status', () => {
     expect((await orderNow(order.id)).status).toBe('processing');
   });
 
-  test.each([
-    ['another seller', () => otherSeller],
-    ['the buyer who placed the order', () => buyer],
-  ])('%s is refused with 403 and the order does not change', async (label, who) => {
+  test('the buyer who placed the order is refused with 403 (wrong role) and the order does not change', async () => {
     const order = await makeOrder('confirmed');
-    const res = await setStatus(order.id, who(), { status: 'processing' });
+    const res = await setStatus(order.id, buyer, { status: 'processing' });
     expect(res.status).toBe(403);
+    expect((await orderNow(order.id)).status).toBe('confirmed');
+  });
+
+  test('another seller is told the order does not exist (404) and the order does not change', async () => {
+    const order = await makeOrder('confirmed');
+    const res = await setStatus(order.id, otherSeller, { status: 'processing' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Order not found');
     expect((await orderNow(order.id)).status).toBe('confirmed');
   });
 
