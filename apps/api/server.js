@@ -1568,6 +1568,41 @@ app.post('/api/products/:id/reviews', requireAuth, validate(schemas.reviewSchema
   }
 });
 
+const LATE_PAYMENT_MESSAGE =
+  'Payment verified, but this order was already cancelled. The payment is recorded and a refund is due.';
+
+// A verified payment that arrives for an order that is already cancelled (by the buyer, the seller, the
+// expiry job, or a cancel that won a race). The money was taken, so write the payment and the refund that is
+// owed. The order's payment id doubles as the "already recorded" mark, so repeating the request writes nothing.
+// Returns true only the first time. A payment id that belongs to another order throws P2002 (the caller answers 409).
+async function recordLatePayment(order, paymentId) {
+  const recorded = await prisma.$transaction(async (tx) => {
+    const marked = await tx.order.updateMany({
+      where: { id: order.id, status: 'cancelled', razorpayPaymentId: null },
+      data: { razorpayPaymentId: paymentId },
+    });
+    if (marked.count === 0) return false;
+
+    await tx.transaction.createMany({
+      data: [
+        { orderId: order.id, type: 'payment', amount: order.subtotal },
+        { orderId: order.id, type: 'refund', amount: -order.subtotal },
+      ],
+    });
+    return true;
+  });
+
+  if (recorded) {
+    await notify(
+      order.buyerId,
+      'refunds',
+      'Payment received for a cancelled order',
+      `Your payment of ₹${order.subtotal} was received after the order was cancelled. A refund is due.`
+    );
+  }
+  return recorded;
+}
+
 app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
   try {
     const body = req.body || {};
@@ -1594,6 +1629,32 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
     // A repeated request for a payment that already went through is safe.
     if (order.status === 'confirmed' && order.razorpayPaymentId === razorpay_payment_id) {
       return res.json({ message: 'Payment already confirmed', order: forBuyer(order) });
+    }
+
+    if (order.status === 'cancelled') {
+      // A genuine late payment (right Razorpay order, valid signature) must not be lost: record it and the refund owed.
+      // Anything that does not check out is refused exactly as before, and nothing is written.
+      const looksGenuine =
+        !!order.razorpayOrderId &&
+        order.razorpayOrderId === razorpay_order_id &&
+        signaturesMatch(
+          crypto
+            .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+            .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+            .digest('hex'),
+          razorpay_signature
+        );
+      if (looksGenuine) {
+        try {
+          await recordLatePayment(order, razorpay_payment_id);
+        } catch (err) {
+          if (err.code === 'P2002') {
+            return res.status(409).json({ error: 'This payment was already used for another order' });
+          }
+          throw err;
+        }
+        return res.status(409).json({ error: LATE_PAYMENT_MESSAGE });
+      }
     }
 
     if (order.status !== 'payment_pending') {
@@ -1670,6 +1731,19 @@ app.post('/api/orders/:id/confirm-payment', requireAuth, async (req, res) => {
       });
     } catch (err) {
       if (err.code === 'ALREADY_PROCESSED') {
+        // If a cancel won the race, the verified payment still has to be recorded.
+        const now = await prisma.order.findUnique({ where: { id: order.id } });
+        if (now && now.status === 'cancelled') {
+          try {
+            await recordLatePayment(now, razorpay_payment_id);
+          } catch (lateErr) {
+            if (lateErr.code === 'P2002') {
+              return res.status(409).json({ error: 'This payment was already used for another order' });
+            }
+            throw lateErr;
+          }
+          return res.status(409).json({ error: LATE_PAYMENT_MESSAGE });
+        }
         return res.status(409).json({ error: 'This order is already being processed' });
       }
       if (err.code === 'P2002') {
