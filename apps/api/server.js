@@ -95,7 +95,7 @@ app.use(
 );
 app.use(['/api/orders/:id/create-payment', '/api/orders/:id/confirm-payment'], makeLimiter({ limit: Number(process.env.PAYMENT_RATE_LIMIT) || 30 }));
 
-const prisma = new PrismaClient();
+const { prisma } = require('./lib/prisma');
 
 const RETURN_WINDOW_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
